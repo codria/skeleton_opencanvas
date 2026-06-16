@@ -1,0 +1,60 @@
+"""
+user_settings.py
+ユーザーがスライダー等で調整した値を JSON で永続化する。
+起動時に load() で読み込み、終了時に save() で書き出す。
+ファイルがなければデフォルトを返す、壊れていれば warning ログ＋デフォルト。
+"""
+
+from __future__ import annotations
+import json
+import logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# プロジェクトルート直下に置く（git 管理外）
+SETTINGS_FILE = Path("user_settings.json")
+
+DEFAULTS: dict = {
+    "num_poses": 1,
+    "smoothing_alpha": 0.25,
+    "graph_scale": 1.0,
+    "graph_visible": True,
+    "show_bones": False,
+    "trail_point_size": 6.0,
+    "trail_line_width": 3.0,
+    "trail_max_points": 32,
+    "overlay_alpha": 1.0,
+    "mode2_size_scale": 0.28,
+    "mode3_speed": 30.0,
+    "mode3_angle": 0.0,
+}
+
+
+def load() -> dict:
+    """設定を読み込んで dict で返す。欠損キーは DEFAULTS で補完。"""
+    if not SETTINGS_FILE.exists():
+        logger.info(f"{SETTINGS_FILE} が無いのでデフォルト設定を使用")
+        return DEFAULTS.copy()
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError(f"top-level が dict ではない: {type(data)}")
+        merged = {**DEFAULTS, **data}
+        logger.info(f"{SETTINGS_FILE} 読み込み完了")
+        return merged
+    except Exception as e:
+        logger.warning(f"{SETTINGS_FILE} 読み込み失敗（デフォルト使用）: {e}")
+        return DEFAULTS.copy()
+
+
+def save(values: dict) -> None:
+    """設定を書き出す。失敗しても例外は外に出さず warning ログだけ出す
+    （アプリ終了処理を止めない）。"""
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(values, f, indent=2, ensure_ascii=False)
+        logger.info(f"{SETTINGS_FILE} に設定を保存")
+    except Exception as e:
+        logger.warning(f"{SETTINGS_FILE} 保存失敗: {e}")

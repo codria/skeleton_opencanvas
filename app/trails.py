@@ -59,24 +59,27 @@ class TrailBuffer:
     def update(self, landmarks, tp) -> None:
         """新しいフレームのランドマークから対象 4 点を取り出して各バッファに追加する。
         tp は (x, y, z) を返す座標変換関数（Mode2/3 共通インターフェース）。
-        visibility 不足のときはバッファに追加せず、currently_visible を False に。
+        visibility 不足のときは buffer をクリア（点も線も消える）。
+        「描画するかどうか」は buffer の中身だけで決まるよう責務を一箇所に集約。
         """
         for pid in TRACKED_POINTS:
             if pid >= len(landmarks):
                 self._currently_visible[pid] = False
+                self._buffers[pid].clear()
                 continue
             lm = landmarks[pid]
             if lm.visibility < MIN_VIS:
                 self._currently_visible[pid] = False
+                self._buffers[pid].clear()
                 continue
             self._buffers[pid].append(tp(lm))
             self._currently_visible[pid] = True
 
     def mark_all_invisible(self) -> None:
-        """このフレームは検出結果が空。点を消すために全部 invisible にする
-        （線の履歴は残す）。"""
+        """このフレームは検出結果が空。buffer をクリアして点・線とも消す。"""
         for pid in TRACKED_POINTS:
             self._currently_visible[pid] = False
+            self._buffers[pid].clear()
 
     def is_currently_visible(self, pid: int) -> bool:
         return self._currently_visible.get(pid, False)

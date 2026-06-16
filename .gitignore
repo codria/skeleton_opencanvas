@@ -7,6 +7,9 @@ assets/models/
 # サンプル動画・書き出した動画（大容量のためGit管理対象外）
 sample_vid/
 
+# 端末ごとのユーザー設定（スライダー値の永続化）
+user_settings.json
+
 # Python キャッシュ
 __pycache__/
 *.pyc

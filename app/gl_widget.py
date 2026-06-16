@@ -15,10 +15,15 @@ from OpenGL.GL import (
     glMatrixMode, glLoadIdentity, glOrtho, glViewport,
     glEnable, glDisable, glColor3f, glColor4f, glLineWidth, glPointSize,
     glBegin, glEnd, glVertex2f, glTexCoord2f, glBindTexture,
+    glBlendFunc, glHint,
     GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
     GL_PROJECTION, GL_MODELVIEW,
     GL_LINES, GL_POINTS, GL_QUADS, GL_TEXTURE_2D,
     GL_DEPTH_TEST, GL_LIGHTING, GL_BLEND,
+    GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+    GL_LINE_SMOOTH, GL_LINE_SMOOTH_HINT,
+    GL_POINT_SMOOTH, GL_POINT_SMOOTH_HINT,
+    GL_NICEST,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,6 +195,14 @@ class GLWidget(QOpenGLWidget):
 
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
+        # アンチエイリアス：線・点とも GL_BLEND と組合せて滑らかに描く
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_LINE_SMOOTH)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+        glEnable(GL_POINT_SMOOTH)
+        glHint(GL_POINT_SMOOTH_HINT, GL_NICEST)
+
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         glOrtho(0, view_w, view_h, 0, -1, 1)
@@ -199,28 +212,33 @@ class GLWidget(QOpenGLWidget):
 
         MIN_VIS = 0.4
 
-        for result in results:
-            lms = result.landmarks
+        try:
+            for result in results:
+                lms = result.landmarks
 
-            # ボーン線（黄色）
-            glColor3f(1.0, 1.0, 0.0)
-            glLineWidth(2.0)
-            glBegin(GL_LINES)
-            for (a, b) in POSE_CONNECTIONS:
-                if (lms[a].visibility >= MIN_VIS and
-                        lms[b].visibility >= MIN_VIS):
-                    glVertex2f(lms[a].x * view_w, lms[a].y * view_h)
-                    glVertex2f(lms[b].x * view_w, lms[b].y * view_h)
-            glEnd()
+                # ボーン線（黄色）
+                glColor3f(1.0, 1.0, 0.0)
+                glLineWidth(2.0)
+                glBegin(GL_LINES)
+                for (a, b) in POSE_CONNECTIONS:
+                    if (lms[a].visibility >= MIN_VIS and
+                            lms[b].visibility >= MIN_VIS):
+                        glVertex2f(lms[a].x * view_w, lms[a].y * view_h)
+                        glVertex2f(lms[b].x * view_w, lms[b].y * view_h)
+                glEnd()
 
-            # 関節点（シアン）
-            glColor3f(0.0, 1.0, 1.0)
-            glPointSize(8.0)
-            glBegin(GL_POINTS)
-            for lm in lms:
-                if lm.visibility >= MIN_VIS:
-                    glVertex2f(lm.x * view_w, lm.y * view_h)
-            glEnd()
+                # 関節点（シアン）
+                glColor3f(0.0, 1.0, 1.0)
+                glPointSize(8.0)
+                glBegin(GL_POINTS)
+                for lm in lms:
+                    if lm.visibility >= MIN_VIS:
+                        glVertex2f(lm.x * view_w, lm.y * view_h)
+                glEnd()
+        finally:
+            glDisable(GL_LINE_SMOOTH)
+            glDisable(GL_POINT_SMOOTH)
+            glDisable(GL_BLEND)
 
     def resizeGL(self, w: int, h: int) -> None:
         """ウィンドウサイズが変わっても内部 FBO は固定。

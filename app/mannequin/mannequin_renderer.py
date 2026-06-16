@@ -27,7 +27,8 @@ from OpenGL.GL import (
     GL_FRONT, GL_BACK, GL_NORMALIZE,
     glColor4f, glLineWidth, glPointSize, glBlendFunc,
     GL_BLEND, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_LINE_STRIP, GL_POINTS,
-    GL_POINT_SMOOTH,
+    GL_POINT_SMOOTH, GL_LINE_SMOOTH, GL_LINE_SMOOTH_HINT, GL_NICEST,
+    glHint,
 )
 from OpenGL.GLU import gluPerspective
 from app.mannequin.primitives import (
@@ -193,6 +194,10 @@ class MannequinRenderer:
     def set_trail_max_points(self, n: int) -> None:
         """軌跡の最大保持点数（点数が多いほど長い軌跡）。"""
         self._trail_buffer.set_max_points(n)
+
+    def reset_trail(self) -> None:
+        """シーク・モード切替等の時系列ジャンプで連続性が崩れる時に呼ぶ。"""
+        self._trail_buffer.reset()
 
     @property
     def mannequin_visible(self) -> bool:
@@ -847,8 +852,12 @@ class MannequinRenderer:
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         try:
-            # 線
+            # 線（アンチエイリアス付き）
+            # GL_LINE_STRIP は太線の接続部 (joint) の隙間処理がないため
+            # 急な角で線分が割れて見えることがあるが、運用上は許容する。
             if self._trail_line_width > 0.0:
+                glEnable(GL_LINE_SMOOTH)
+                glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
                 glLineWidth(self._trail_line_width)
                 for _pid, color, pts in self._trail_buffer.items():
                     n = len(pts)
@@ -862,7 +871,8 @@ class MannequinRenderer:
                         glVertex3f(x, y, z)
                     glEnd()
             # 点（軌跡全体ではなく「現在の手足の位置」だけ描く）
-            # 現在フレームで認識失敗 (visibility<閾値) の部位は描かない。
+            # 認識失敗時は trail_buffer.update が buffer を空にしてくれるので、
+            # ここでは buffer の中身だけ見ればよい（描画判定は buffer 側で一元管理）。
             if self._trail_point_size > 0.0:
                 glEnable(GL_POINT_SMOOTH)
                 glPointSize(self._trail_point_size)
@@ -870,14 +880,13 @@ class MannequinRenderer:
                 for pid, color, pts in self._trail_buffer.items():
                     if not pts:
                         continue
-                    if not self._trail_buffer.is_currently_visible(pid):
-                        continue
                     r, g, b = color
                     x, y, z = pts[-1]
                     glColor4f(r, g, b, 1.0)
                     glVertex3f(x, y, z)
                 glEnd()
         finally:
+            glDisable(GL_LINE_SMOOTH)
             glDisable(GL_BLEND)
             glEnable(GL_DEPTH_TEST)
             glEnable(GL_LIGHTING)

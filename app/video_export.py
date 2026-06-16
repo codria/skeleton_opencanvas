@@ -10,6 +10,9 @@ MP4 に書き出す。
 
 from __future__ import annotations
 import logging
+import os
+import shutil
+import subprocess
 import cv2
 import numpy as np
 from PyQt6.QtCore import QCoreApplication, Qt
@@ -182,7 +185,101 @@ class VideoExporter:
             writer.release()
 
         logger.info(f"VideoExporter 完了: {frame_idx}/{effective_total} フレーム書き出し")
+
+        # 元動画から音声トラックを mux（ffmpeg がある場合のみ）。
+        # OpenCV の VideoWriter は音声非対応なので、書き出し後に後処理で合成する。
+        # 失敗しても無音動画はそのまま残るので致命的ではない。
+        self._mux_audio_from_source(self._output_path, self._input_path)
+
         return frame_idx, effective_total
+
+    @staticmethod
+    def _find_ffmpeg() -> str | None:
+        """ffmpeg.exe の絶対パスを返す。PATH に無ければ既知の同梱アプリも確認する。"""
+        p = shutil.which("ffmpeg")
+        if p:
+            return p
+        # Windows でよく入っているサードパーティ同梱版（フル機能）
+        candidates = [
+            r"C:\Program Files\Shotcut\ffmpeg.exe",
+            r"C:\Program Files\Krita (x64)\bin\ffmpeg.exe",
+            r"C:\Program Files\obs-studio\bin\64bit\ffmpeg.exe",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return None
+
+    def _mux_audio_from_source(self, video_path: str, source_path: str) -> bool:
+        """書き出し済み無音動画 video_path に source_path の音声を mux する。
+        ffmpeg を subprocess で呼び、成功すれば video_path を音声付きで上書き。
+        - ffmpeg が見つからない → 警告ログだけで無音のまま終了
+        - 元動画に音声トラックがない → ffmpeg がエラー終了、警告ログ
+        - max_frames で切り詰めた書き出しでも -shortest で映像長に合わせて切る
+        戻り値 True で音声 mux 成功、False で無音のまま。
+        """
+        ffmpeg_exe = self._find_ffmpeg()
+        if not ffmpeg_exe:
+            logger.info("ffmpeg が見つからないため音声 mux をスキップ（無音で出力）")
+            return False
+        logger.info(f"音声 mux に使用する ffmpeg: {ffmpeg_exe}")
+
+        base, ext = os.path.splitext(video_path)
+        temp_output = f"{base}_audio_tmp{ext or '.mp4'}"
+        cmd = [
+            ffmpeg_exe, "-y",
+            "-i", video_path,
+            "-i", source_path,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-map", "0:v:0",
+            "-map", "1:a:0?",   # ? = 元動画に音声トラックが無くてもエラーにしない
+            "-shortest",
+            temp_output,
+        ]
+        logger.info("ffmpeg で音声 mux 開始")
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=600,
+                encoding="utf-8", errors="replace",
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("ffmpeg 音声 mux タイムアウト（無音のまま）")
+            if os.path.exists(temp_output):
+                try:
+                    os.remove(temp_output)
+                except Exception:
+                    pass
+            return False
+        except Exception as e:
+            logger.warning(f"ffmpeg 音声 mux 実行例外（無音のまま）: {e}")
+            if os.path.exists(temp_output):
+                try:
+                    os.remove(temp_output)
+                except Exception:
+                    pass
+            return False
+
+        if result.returncode != 0:
+            err_tail = (result.stderr or "")[-400:]
+            logger.warning(
+                f"ffmpeg 音声 mux 失敗（無音のまま）returncode={result.returncode}: ...{err_tail}"
+            )
+            if os.path.exists(temp_output):
+                try:
+                    os.remove(temp_output)
+                except Exception:
+                    pass
+            return False
+
+        try:
+            os.replace(temp_output, video_path)
+        except Exception as e:
+            logger.warning(f"音声付き出力の差し替えに失敗（無音のまま残る）: {e}")
+            return False
+
+        logger.info(f"音声 mux 成功: {video_path}")
+        return True
 
 
 def _qimage_to_bgra_array(img: QImage) -> np.ndarray:
