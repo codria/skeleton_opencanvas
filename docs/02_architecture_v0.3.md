@@ -37,8 +37,13 @@ skeleton_opencanvas/
 │       ├── __init__.py
 │       ├── base_mode.py       # 各モードの基底クラス（OpenGL描画インターフェース定義）
 │       ├── mode1_overlay.py   # モード1：カメラ映像テクスチャ＋骨格線オーバーレイ
-│       ├── mode2_mannequin.py # モード2：背景画像テクスチャ＋マネキン2D描画
+│       ├── mode2_mannequin.py # モード2：背景画像テクスチャ＋3Dマネキン正射影描画
 │       └── mode3_3d.py        # モード3：3D空間＋キャラクター描画
+│
+├── app/mannequin/
+│   ├── __init__.py
+│   ├── mannequin_renderer.py  # 3Dマネキン描画クラス（モード2・3共用）
+│   └── primitives.py          # 球・カプセルなどのOpenGL3Dプリミティブ描画関数
 │
 ├── assets/
 │   ├── backgrounds/           # モード2用背景画像置き場
@@ -53,8 +58,8 @@ skeleton_opencanvas/
 | モジュール | 責務 |
 |-----------|------|
 | `main.py` | アプリ起動・PyQt6 イベントループ開始・起動時エラー（CameraNotFoundError・ConfigLoadError）のハンドリング |
-| `app/main_window.py` | GUIレイアウト・モード切り替え制御・ファイル選択ダイアログ・操作ガイドおよびモード名のQLabel管理（gl_widgetの上にオーバーレイ） |
-| `app/gl_widget.py` | QOpenGLWidget継承・paintGL()でアクティブモードのdraw()を呼び出す・FPS表示切り替え（Fキー） |
+| `app/main_window.py` | GUIレイアウト・モード切り替え制御・ファイル選択ダイアログ・各種QLabelのオーバーレイ管理（モード名・ガイド・デバッグ・ボタンパネル） |
+| `app/gl_widget.py` | QOpenGLWidget継承・ウィンドウ全体を占有・paintGL()でアクティブモードのdraw()を呼び出す |
 | `app/capture_worker.py` | QThreadによるバックグラウンドスレッド・カメラ取得→骨格推定→シグナル送信のループ・FPS計測 |
 | `app/camera.py` | カメラデバイス接続・解像度およびFPS設定・フレーム取得・起動時疎通確認 |
 | `app/pose_estimator.py` | MediaPipe Pose Landmarker の初期化・骨格推定・結果の正規化・リソース解放（release） |
@@ -62,8 +67,10 @@ skeleton_opencanvas/
 | `app/pose_constants.py` | ランドマークインデックス定数・POSE_CONNECTIONS の定義（全モード共通参照） |
 | `app/modes/base_mode.py` | 全モード共通の抽象基底クラス。`draw(frame, results, width, height)` を抽象メソッドとして定義 |
 | `app/modes/mode1_overlay.py` | OpenGLテクスチャにカメラ映像を貼り、骨格線をプリミティブで重畳描画 |
-| `app/modes/mode2_mannequin.py` | OpenGLテクスチャに背景画像を貼り、マネキンを2Dプリミティブで描画（デザイン差し替え対応） |
-| `app/modes/mode3_3d.py` | OpenGLで3D空間を生成しキャラクターを描画。視点をQTimerで自動回転 |
+| `app/modes/mode2_mannequin.py` | 背景画像をクロップ表示・MannequinRendererで3Dマネキンを正射影描画 |
+| `app/modes/mode3_3d.py` | OpenGLで3D空間を生成しMannequinRendererで透視投影描画。視点をQTimerで自動回転 |
+| `app/mannequin/mannequin_renderer.py` | 3Dマネキン描画クラス（モード2・3共用）。正射影/透視投影を切り替え可能 |
+| `app/mannequin/primitives.py` | 球・カプセルなどのOpenGL3Dプリミティブ描画関数 |
 
 ## 依存関係
 
@@ -100,26 +107,32 @@ main.py
 
 [メインスレッド]
   → main_window._on_frame_ready() でシグナル受信
-  → gl_widget.update_frame() 呼び出し
+  → gl_widget.update_frame() 呼び出し → 再描画トリガー
   → gl_widget.paintGL()
         → active_mode.draw(frame, results, width, height)
-              モード1: カメラ映像テクスチャ → 骨格線プリミティブ
-              モード2: 背景画像テクスチャ  → マネキンプリミティブ
-              モード3: 3D空間生成         → キャラクター描画
-        → [Fキー ON時] QPainterでFPS・デバッグ情報をオーバーレイ描画
+              モード1: カメラ映像テクスチャ（アスペクト比維持）→ 骨格線プリミティブ
+              モード2: 背景画像テクスチャ（クロップ・画面全体）→ MannequinRenderer.draw_ortho()（正射影）
+              モード3: 3D空間生成 → MannequinRenderer.draw_perspective()（透視投影・視点回転）
+  → main_window がデバッグQLabelのテキストを更新（FPS・人数・解像度）
 
-[QLabel オーバーレイ（OpenGLコンテキスト外）]
-  → モード名・キー操作ガイドを常時表示
-  → モード切り替え時に main_window.py がテキストを更新
+[オーバーレイQLabelたち（gl_widgetの子ウィジェット）]
+  → モード名QL abel（左上）：常時表示、Hキーで非表示
+  → ガイドラベル（右下・ボタンパネルの上）：常時表示、Hキーで非表示
+  → デバッグラベル（モード名の下）：Fキーで表示、Hキーで非表示
+  → ボタンパネル（下部オーバーレイ）：常時表示
 ```
 
 - 全モードは `QOpenGLWidget` の `paintGL()` コンテキスト内で描画する
 - `gl_widget.py` がアクティブモードの `draw()` を呼び出す唯一の窓口となる
 - モード切り替えは `main_window.py` がアクティブモードを差し替えるだけでよい
-- 操作ガイド・モード名表示は `main_window.py` が管理するQLabelで行い、OpenGLコンテキスト外で完結させる
-- FPS・デバッグ情報は `gl_widget.py` が QPainter でオーバーレイ描画し、Fキーで表示切り替え
+- `gl_widget.py` はウィンドウ全体を占有するセントラルウィジェットとして配置する
+- ボタンパネル・モード名・ガイド・デバッグ情報は全て `gl_widget.py` の子ウィジェット（QLabel・QWidget）としてオーバーレイ表示する
+- FPS・デバッグ情報は `main_window.py` が管理するQLabelで表示し、OpenGLコンテキスト外で完結させる
+- HキーでモードQL abel・ガイド・デバッグのみ非表示（ボタンパネルは常時表示）
 - モード同士は互いに依存しない
 - `camera.py` と `pose_estimator.py` はモードに依存しない
+- モード切り替え時は `on_mode_enter()` でOpenGL状態（GL_LIGHTING・GL_DEPTH_TEST等）をリセットし、前モードの状態汚染を防ぐ
+- `on_mode_enter()` はOpenGLコンテキスト確立後（`initializeGL()` 後）のみ呼ぶ
 
 ## ライブラリ構成
 

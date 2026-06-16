@@ -77,6 +77,7 @@ def main() -> None:
         num_poses=config.get("pose.num_poses", 3),
         min_detection_confidence=config.get("pose.min_detection_confidence", 0.5),
         min_tracking_confidence=config.get("pose.min_tracking_confidence", 0.5),
+        smoothing_alpha=config.get("pose.smoothing_alpha", 0.4),
     )
 
     # メインウィンドウの起動

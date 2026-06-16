@@ -1,18 +1,37 @@
 """
 camera.py
-カメラデバイス接続・解像度およびFPS設定・フレーム取得・起動時疎通確認を担当する。
+映像ソース（カメラデバイス or 動画ファイル）の接続・フレーム取得・起動時疎通確認を担当する。
+ランタイムでのソース切替（カメラ⇄動画）と動画 EOF 時のループ再生に対応する。
 """
 
 from __future__ import annotations
 import logging
+import platform
+import threading
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# プラットフォーム別カメラバックエンド：
+#   Windows : DirectShow (CAP_DSHOW)
+#   macOS   : AVFoundation (CAP_AVFOUNDATION)
+#   Linux 他: デフォルト (V4L2 等)
+_SYSTEM = platform.system()
+if _SYSTEM == "Windows":
+    _CAMERA_BACKEND = cv2.CAP_DSHOW
+elif _SYSTEM == "Darwin":
+    _CAMERA_BACKEND = cv2.CAP_AVFOUNDATION
+else:
+    _CAMERA_BACKEND = cv2.CAP_ANY
+
 
 class CameraNotFoundError(Exception):
     """起動時にカメラデバイスが見つからない場合に送出する。"""
+
+
+class SourceOpenError(Exception):
+    """ランタイムでの映像ソース切替に失敗した場合に送出する（軽微エラー）。"""
 
 
 class Camera:
@@ -20,71 +39,203 @@ class Camera:
         """カメラデバイス番号・解像度・FPS を受け取る。
 
         Args:
-            device_index : カメラデバイス番号（0, 1, 2 ...）
-            width        : キャプチャ幅（px）
-            height       : キャプチャ高さ（px）
-            fps          : 目標フレームレート
+            device_index : 初期カメラデバイス番号（0, 1, 2 ...）
+            width        : キャプチャ幅（px、デバイスのみ有効）
+            height       : キャプチャ高さ（px、デバイスのみ有効）
+            fps          : 目標フレームレート（デバイスのみ有効）
         """
         self._device_index = device_index
         self._width = width
         self._height = height
         self._fps = fps
         self._cap: cv2.VideoCapture | None = None
+        # 現在のソース：int（デバイス番号）or str（ファイルパス）
+        self._source: int | str = device_index
+        # read_frame / switch_source の競合防止
+        self._lock = threading.Lock()
+        # 動画再生制御
+        self._paused = False
+        self._loop = True
+        self._speed = 1.0
+
+    @property
+    def device_index(self) -> int:
+        """起動時に指定されたカメラデバイス番号（カメラ復帰用）。"""
+        return self._device_index
+
+    @property
+    def is_video_file(self) -> bool:
+        """現在のソースが動画ファイルか。"""
+        return isinstance(self._source, str)
+
+    @property
+    def source_fps(self) -> float:
+        """現在のソースの fps（cap から取得した実値）。
+        不明な場合は構築時の self._fps を返す。"""
+        if self._cap is None:
+            return float(self._fps)
+        v = self._cap.get(cv2.CAP_PROP_FPS)
+        return v if v and v > 0 else float(self._fps)
+
+    # --- 動画再生制御（動画ファイル時のみ意味を持つ） -----------------------
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def set_paused(self, paused: bool) -> None:
+        self._paused = paused
+
+    def toggle_paused(self) -> bool:
+        self._paused = not self._paused
+        return self._paused
+
+    @property
+    def loop(self) -> bool:
+        return self._loop
+
+    def set_loop(self, loop: bool) -> None:
+        self._loop = loop
+
+    def toggle_loop(self) -> bool:
+        self._loop = not self._loop
+        return self._loop
+
+    @property
+    def speed(self) -> float:
+        return self._speed
+
+    def set_speed(self, speed: float) -> None:
+        self._speed = max(0.1, float(speed))
+
+    @property
+    def frame_pos(self) -> int:
+        """動画ファイルの現在フレーム位置。カメラ時は 0。"""
+        if self._cap is None or not self.is_video_file:
+            return 0
+        return int(self._cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+    @property
+    def frame_count(self) -> int:
+        """動画ファイルの総フレーム数。カメラ時は 0。"""
+        if self._cap is None or not self.is_video_file:
+            return 0
+        return int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    def seek(self, frame_index: int) -> None:
+        """動画ファイルの再生位置を frame_index にジャンプさせる。"""
+        with self._lock:
+            if self._cap is None or not self.is_video_file:
+                return
+            total = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frame_index = max(0, min(frame_index, max(total - 1, 0)))
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
 
     def start(self) -> None:
-        """カメラを起動する。
+        """初期ソース（カメラ）を起動する。
         カメラが見つからない・映像が取得できない場合は CameraNotFoundError を送出する。
         """
-        self._cap = cv2.VideoCapture(self._device_index, cv2.CAP_DSHOW)
+        try:
+            self._open(self._device_index)
+        except SourceOpenError as e:
+            raise CameraNotFoundError(str(e)) from e
 
-        if not self._cap.isOpened():
-            raise CameraNotFoundError(
-                f"カメラが見つかりません（device_index={self._device_index}）。"
-                "カメラを接続し直すか、config.yaml の camera.device_index を変更してください。"
-            )
+    def switch_source(self, source: int | str) -> None:
+        """ランタイムで入力ソースを切替する。
+        失敗時は SourceOpenError を送出し、既存ソースを継続する。
+        """
+        with self._lock:
+            old_cap = self._cap
+            old_source = self._source
+            try:
+                self._open(source)
+            except SourceOpenError:
+                # _open 内で失敗した場合は self._cap / self._source は変えていない
+                raise
+            else:
+                if old_cap is not None and old_cap is not self._cap:
+                    old_cap.release()
+                logger.info(
+                    f"映像ソース切替: {old_source!r} → {source!r}"
+                )
 
-        # 解像度・FPS を設定
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
-        self._cap.set(cv2.CAP_PROP_FPS, self._fps)
+    def _open(self, source: int | str) -> None:
+        """指定ソースを開いて self._cap / self._source を更新する。
+        失敗時は SourceOpenError を送出し、self の状態は変更しない。
+        """
+        if isinstance(source, str):
+            cap = cv2.VideoCapture(source)
+            label = f"動画ファイル {source}"
+        else:
+            cap = cv2.VideoCapture(source, _CAMERA_BACKEND)
+            label = f"カメラ device_index={source}"
 
-        # 疎通確認：実際にフレームが取得できるか検証
-        ret, _ = self._cap.read()
+        if not cap.isOpened():
+            raise SourceOpenError(f"{label} を開けません。")
+
+        if not isinstance(source, str):
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+            cap.set(cv2.CAP_PROP_FPS, self._fps)
+
+        ret, _ = cap.read()
         if not ret:
-            self._cap.release()
-            raise CameraNotFoundError(
-                f"カメラ（device_index={self._device_index}）からフレームを取得できません。"
-            )
+            cap.release()
+            raise SourceOpenError(f"{label} からフレームを取得できません。")
 
-        actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = self._cap.get(cv2.CAP_PROP_FPS)
+        # 動画ファイルは先頭から再生し直す
+        if isinstance(source, str):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        self._cap = cap
+        self._source = source
+        # ソース切替時に再生制御を初期状態へリセット
+        self._paused = False
+        self._loop = True
+        self._speed = 1.0
+
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
         logger.info(
-            f"カメラ起動完了 device_index={self._device_index} "
-            f"解像度={actual_w}x{actual_h} FPS={actual_fps:.1f}"
+            f"{label} を開きました 解像度={actual_w}x{actual_h} FPS={actual_fps:.1f}"
         )
 
     def read_frame(self) -> np.ndarray | None:
         """最新フレームをBGR numpy配列で返す。
+        動画ファイルは EOF 到達時に先頭へ巻き戻してループ再生する。
         取得できない場合は None を返す（例外は送出しない）。
         """
-        if self._cap is None or not self._cap.isOpened():
-            logger.warning("カメラが起動していません。")
-            return None
+        with self._lock:
+            if self._cap is None or not self._cap.isOpened():
+                logger.warning("映像ソースが起動していません。")
+                return None
 
-        ret, frame = self._cap.read()
-        if not ret:
+            ret, frame = self._cap.read()
+            if ret:
+                return frame
+
+            # 動画ファイル EOF: ループ ON なら先頭へ、OFF なら一時停止状態にする
+            if isinstance(self._source, str):
+                if self._loop:
+                    self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = self._cap.read()
+                    if ret:
+                        return frame
+                else:
+                    self._paused = True
+                    return None
+
             logger.warning("フレームの取得に失敗しました。")
             return None
 
-        return frame
-
     def release(self) -> None:
-        """カメラリソースを解放する。"""
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
-            logger.info("カメラリソースを解放しました。")
+        """映像ソースのリソースを解放する。"""
+        with self._lock:
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+                logger.info("映像ソースのリソースを解放しました。")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,9 @@
 # MediaPipe モデルファイル（大容量のためGit管理対象外）
 assets/models/
 
+# サンプル動画・書き出した動画（大容量のためGit管理対象外）
+sample_vid/
+
 # Python キャッシュ
 __pycache__/
 *.pyc

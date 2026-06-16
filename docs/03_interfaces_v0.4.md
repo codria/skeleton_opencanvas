@@ -73,19 +73,25 @@ class PoseLandmark:
     # （他33点分は実装時にMediaPipe定義に準拠して完成させる）
 
 POSE_CONNECTIONS: list[tuple[int, int]] = [
-    (11, 12),  # 左肩 - 右肩
-    (11, 13),  # 左肩 - 左肘
-    (13, 15),  # 左肘 - 左手首
-    (12, 14),  # 右肩 - 右肘
-    (14, 16),  # 右肘 - 右手首
-    (11, 23),  # 左肩 - 左腰
-    (12, 24),  # 右肩 - 右腰
-    (23, 24),  # 左腰 - 右腰
-    (23, 25),  # 左腰 - 左膝
-    (25, 27),  # 左膝 - 左足首
-    (24, 26),  # 右腰 - 右膝
-    (26, 28),  # 右膝 - 右足首
-    # （他の接続は実装時にMediaPipe定義に準拠して完成させる）
+    # 顔（目と口のみ接続）
+    (1, 2), (2, 3),     # 左目：内→中→外
+    (4, 5), (5, 6),     # 右目：内→中→外
+    (9, 10),            # 口：左〜右
+    # 上半身
+    (11, 12),           # 左肩〜右肩
+    (11, 13), (13, 15), # 左腕
+    (15, 17), (15, 19), (15, 21),  # 左手
+    (17, 19),
+    (12, 14), (14, 16), # 右腕
+    (16, 18), (16, 20), (16, 22),  # 右手
+    (18, 20),
+    # 体幹
+    (11, 23), (12, 24), (23, 24),  # 肩〜腰
+    # 下半身
+    (23, 25), (25, 27), # 左脚
+    (27, 29), (27, 31), (29, 31),  # 左足
+    (24, 26), (26, 28), # 右脚
+    (28, 30), (28, 32), (30, 32),  # 右足
 ]
 ```
 
@@ -200,7 +206,8 @@ class Camera:
 
 ```python
 class PoseEstimator:
-    def __init__(self, num_poses: int,
+    def __init__(self, model_path: str,
+                 num_poses: int,
                  min_detection_confidence: float,
                  min_tracking_confidence: float) -> None: ...
 
@@ -237,7 +244,9 @@ class BaseMode(ABC):
         """ウィンドウリサイズ時にGLWidget.resizeGL()から呼ばれる（任意実装）。"""
 
     def on_mode_enter(self) -> None:
-        """このモードがアクティブになった時に呼ばれる（任意実装）。"""
+        """このモードがアクティブになった時に呼ばれる（任意実装）。
+        OpenGLコンテキスト確立後のみ呼ばれる。
+        前モードのOpenGL状態汚染をリセットするために使用する。"""
 
     def on_mode_exit(self) -> None:
         """このモードが非アクティブになった時に呼ばれる（任意実装）。"""
@@ -251,6 +260,33 @@ class Mode2Mannequin(BaseMode):
 class Mode3D(BaseMode):
     def set_character(self, character_path: str) -> None:
         """キャラクターモデルを差し替える。"""
+```
+
+### 3-4b. MannequinRenderer（モード2・3共用）
+
+```python
+class MannequinRenderer:
+    """骨格データを受け取り3Dマネキンを描画する共用レンダラー。
+    正射影（モード2）と透視投影（モード3）を切り替え可能。
+    """
+
+    def setup_lighting(self) -> None:
+        """ライティングを設定する。initializeGL後に呼ぶ。"""
+
+    def update_rotation(self, delta: float) -> None:
+        """視点回転角度を更新する（モード3用）。"""
+
+    def draw_ortho(self, results: list[PoseLandmarkResult],
+                   view_x: int, view_y: int,
+                   view_w: int, view_h: int) -> None:
+        """正射影でマネキンを描画する（モード2用）。
+        MediaPipeの正規化座標（0〜1）をそのまま使用する。"""
+
+    def draw_perspective(self, results: list[PoseLandmarkResult],
+                         view_x: int, view_y: int,
+                         view_w: int, view_h: int) -> None:
+        """透視投影でマネキンを描画する（モード3用）。
+        _rotation_y に従って視点を自動回転する。"""
 ```
 
 ### 3-5. CaptureWorker
@@ -282,25 +318,20 @@ class GLWidget(QOpenGLWidget):
 
     def set_mode(self, mode: BaseMode) -> None:
         """アクティブモードを切り替える。
-        旧モードの on_mode_exit()・新モードの initialize() と on_mode_enter() を順に呼ぶ。"""
-
-    def toggle_debug(self) -> None:
-        """FPS・デバッグ情報（人数・解像度）の表示／非表示を切り替える。
-        Fキーから呼ばれる。デフォルトは非表示。"""
+        旧モードの on_mode_exit() を呼ぶ。
+        OpenGLコンテキスト確立済みの場合は新モードの initialize() と on_mode_enter() を呼ぶ。
+        未確立の場合は initializeGL() で initialize/on_mode_enter を呼ぶ。"""
 
     def update_frame(self, frame: np.ndarray | None,
-                     results: list[PoseLandmarkResult],
-                     fps: float = 0.0) -> None:
+                     results: list[PoseLandmarkResult]) -> None:
         """camera・pose_estimatorから最新データを受け取り update() をトリガーする。
-        frame が None の場合は logging.warning を出力して前フレームを維持する。
-        results が空の場合は logging.warning を出力して描画をスキップする。"""
+        frame が None の場合は logging.warning を出力して前フレームを維持する。"""
 
     def initializeGL(self) -> None:
         """OpenGLの初期化。アクティブモードの initialize() を呼ぶ。"""
 
     def paintGL(self) -> None:
-        """アクティブモードの draw(frame, results, width, height) を呼ぶ。
-        デバッグ表示ON時はQPainterでFPS・デバッグ情報をオーバーレイ描画する。"""
+        """アクティブモードの draw(frame, results, width, height) を呼ぶ。"""
 
     def resizeGL(self, w: int, h: int) -> None:
         """アクティブモードの on_resize(w, h) を呼ぶ。"""
@@ -310,10 +341,11 @@ class GLWidget(QOpenGLWidget):
 
 ```python
 class MainWindow(QMainWindow):
-    def __init__(self, config: ConfigLoader) -> None: ...
+    def __init__(self, config: ConfigLoader, camera: Camera,
+                 estimator: PoseEstimator) -> None: ...
 
-    def switch_mode(self, mode: DisplayMode) -> None:
-        """モードを切り替え、操作ガイドQLabelを更新する。"""
+    def switch_mode(self, mode_id: int) -> None:
+        """モードを切り替え、モード名QLabel・ボタン状態を更新する。"""
 
     def open_background_dialog(self) -> None:
         """背景画像ファイル選択ダイアログを開き、
@@ -324,7 +356,18 @@ class MainWindow(QMainWindow):
         致命的エラー（CameraNotFoundError・ConfigLoadError）の表示に使用する。"""
 
     def closeEvent(self, event) -> None:
-        """ウィンドウ終了時に Camera.release()・PoseEstimator.release() を呼ぶ。"""
+        """ウィンドウ終了時に CaptureWorker.stop()・Camera.release()・
+        PoseEstimator.release() を呼ぶ。"""
+
+    # --- 内部メソッド ---
+    def _toggle_ui(self) -> None:
+        """Hキー：モード名・ガイド・デバッグのみ表示切り替え（パネルは常時表示）。"""
+
+    def _toggle_debug(self) -> None:
+        """Fキー：デバッグQLabelの表示切り替え（FPS・人数・解像度）。"""
+
+    def _update_overlay_positions(self) -> None:
+        """showEvent/resizeEvent時に全オーバーレイウィジェットの位置を更新する。"""
 ```
 
 ---
@@ -349,4 +392,5 @@ class ConfigLoadError(Exception):
 | `2` | モード2（マネキン）に切り替え |
 | `3` | モード3（3Dキャラクター）に切り替え |
 | `F` | FPS・デバッグ情報の表示／非表示切り替え（デフォルト：非表示） |
+| `H` | モード名・ガイド・デバッグ情報の表示／非表示切り替え（ボタンパネルは常時表示） |
 | `Q` / `Esc` | アプリ終了（closeEvent経由） |

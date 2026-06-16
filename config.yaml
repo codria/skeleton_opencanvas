@@ -9,14 +9,20 @@ display:
   height: 720
 
 pose:
-  num_poses: 3
+  num_poses: 1
   min_detection_confidence: 0.5
   min_tracking_confidence: 0.5
   model_path: "assets/models/pose_landmarker.task"
+  # ランドマーク平滑化（指数移動平均）の追従係数。1.0=平滑化なし、小さいほど滑らか
+  smoothing_alpha: 0.25
+
+assets:
+  # Mode2 / Mode3 共通のキャラクターモデル（GLTF）。
+  # ディレクトリパスの場合は配下の BlockMan.gltf を自動で解決する。
+  character_model: "assets/characters/BlockMan.gltf"
 
 mode2:
   background_image: "assets/backgrounds/default.jpg"
 
 mode3:
-  character_model: "assets/characters/default"
-  rotation_speed: 0.3
+  rotation_speed: 30.0   # 視点の自動回転速度（度/秒）
