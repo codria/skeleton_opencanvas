@@ -130,7 +130,13 @@ class GLWidget(QOpenGLWidget):
             self._internal_fbo.release()
 
         # Stage 2: 内部 FBO テクスチャを画面サイズに拡大描画
-        glViewport(0, 0, self.width(), self.height())
+        # High DPI（Windows の 125%/150% 等）対策：self.width()/height() は論理 px、
+        # glViewport は物理 px を要求するので devicePixelRatioF() を掛ける。
+        # これをしないと「左下に小さく」表示されてしまう。
+        dpr = self.devicePixelRatioF()
+        fb_w = max(1, int(self.width() * dpr))
+        fb_h = max(1, int(self.height() * dpr))
+        glViewport(0, 0, fb_w, fb_h)
         glClearColor(0.0, 0.0, 0.0, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._blit_internal_fbo_to_screen()
