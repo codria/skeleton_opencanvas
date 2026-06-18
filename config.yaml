@@ -7,6 +7,9 @@ camera:
 display:
   width: 1280
   height: 720
+  # 時系列グラフ（右上）を有効化するか。重い環境（ノート PC 等）で false にすると
+  # グラフ widget が生成されず、関連処理も全部スキップされる。
+  graph_enabled: true
 
 pose:
   num_poses: 1

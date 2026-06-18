@@ -180,32 +180,41 @@ class MainWindow(QMainWindow):
         self._video_control.raise_()
 
         # --- 時系列グラフ（画面右上、X→Y の 2 段）---
-        # 両手両足の画像座標 X / Y を時系列でプロット
-        # 色はトレイルと同じ TRAIL_COLORS を流用して見た目を統一
-        graph_curves = {
-            'LW': TRAIL_COLORS[PoseLandmark.LEFT_WRIST],
-            'RW': TRAIL_COLORS[PoseLandmark.RIGHT_WRIST],
-            'LA': TRAIL_COLORS[PoseLandmark.LEFT_ANKLE],
-            'RA': TRAIL_COLORS[PoseLandmark.RIGHT_ANKLE],
-        }
-        # X：左→右 = 0→1（反転不要）
-        self._graph_x = TimeSeriesGraph(
-            title="両手両足 X",
-            y_range=(0.0, 1.0),
-            invert_y=False,
-            curves=graph_curves,
-            parent=self._gl_widget,
-        )
-        self._graph_x.raise_()
-        # Y：上→下 = 0→1（反転して画面上端が上に見えるように）
-        self._graph_y = TimeSeriesGraph(
-            title="両手両足 Y",
-            y_range=(0.0, 1.0),
-            invert_y=True,
-            curves=graph_curves,
-            parent=self._gl_widget,
-        )
-        self._graph_y.raise_()
+        # config.yaml の display.graph_enabled が false なら widget を作らない。
+        # 重い環境（ノート PC 等）でフリーズを避けたい時に使う。
+        # 以後 self._graph_x / _graph_y は None or TimeSeriesGraph のどちらか。
+        self._graph_enabled: bool = bool(config.get("display.graph_enabled", True))
+        if self._graph_enabled:
+            # 両手両足の画像座標 X / Y を時系列でプロット
+            # 色はトレイルと同じ TRAIL_COLORS を流用して見た目を統一
+            graph_curves = {
+                'LW': TRAIL_COLORS[PoseLandmark.LEFT_WRIST],
+                'RW': TRAIL_COLORS[PoseLandmark.RIGHT_WRIST],
+                'LA': TRAIL_COLORS[PoseLandmark.LEFT_ANKLE],
+                'RA': TRAIL_COLORS[PoseLandmark.RIGHT_ANKLE],
+            }
+            # X：左→右 = 0→1（反転不要）
+            self._graph_x: TimeSeriesGraph | None = TimeSeriesGraph(
+                title="両手両足 X",
+                y_range=(0.0, 1.0),
+                invert_y=False,
+                curves=graph_curves,
+                parent=self._gl_widget,
+            )
+            self._graph_x.raise_()
+            # Y：上→下 = 0→1（反転して画面上端が上に見えるように）
+            self._graph_y: TimeSeriesGraph | None = TimeSeriesGraph(
+                title="両手両足 Y",
+                y_range=(0.0, 1.0),
+                invert_y=True,
+                curves=graph_curves,
+                parent=self._gl_widget,
+            )
+            self._graph_y.raise_()
+        else:
+            self._graph_x = None
+            self._graph_y = None
+            logger.info("時系列グラフは config.display.graph_enabled=false により無効化")
 
         # --- Mode3 回転コントロール（Mode3 アクティブ時のみ表示）---
         self._mode3_ctrl = Mode3ControlPanel(self._gl_widget)
@@ -244,9 +253,10 @@ class MainWindow(QMainWindow):
         self._graph_size_ctrl.set_value(self._graph_scale)
         self._graph_size_ctrl.scale_changed.connect(self._on_graph_scale_changed)
         self._graph_size_ctrl.raise_()
-        # 初期フォントスケールを反映
-        self._graph_x.set_font_scale(self._graph_scale)
-        self._graph_y.set_font_scale(self._graph_scale)
+        # 初期フォントスケールを反映（グラフ無効時は no-op）
+        if self._graph_x is not None:
+            self._graph_x.set_font_scale(self._graph_scale)
+            self._graph_y.set_font_scale(self._graph_scale)
 
         # --- 軌跡コントロール（Mode2/3 アクティブ時のみ表示）---
         self._trail_ctrl = TrailControlPanel(self._gl_widget)
@@ -325,12 +335,14 @@ class MainWindow(QMainWindow):
 
         # 時系列グラフ：右上に X グラフ、その下に Y グラフ
         # 基準サイズ 360x180 に係数を掛けた固定サイズ（ウィンドウサイズ非追従）
+        # graph_enabled=false なら widget が None なので setGeometry は skip
         graph_w = max(80, int(360 * self._graph_scale))
         graph_h = max(40, int(180 * self._graph_scale))
-        self._graph_x.setGeometry(gw - graph_w - 10, 10, graph_w, graph_h)
-        self._graph_y.setGeometry(
-            gw - graph_w - 10, 10 + graph_h + 8, graph_w, graph_h
-        )
+        if self._graph_x is not None:
+            self._graph_x.setGeometry(gw - graph_w - 10, 10, graph_w, graph_h)
+            self._graph_y.setGeometry(
+                gw - graph_w - 10, 10 + graph_h + 8, graph_w, graph_h
+            )
         # 後続レイアウトで「グラフの下」基準値として 2 段の合計を保持
         graph_h = graph_h * 2 + 8
 
@@ -453,11 +465,21 @@ class MainWindow(QMainWindow):
         logger.info(f"UI表示: {'ON' if self._ui_visible else 'OFF'}")
 
     def _toggle_graph(self) -> None:
-        """Gキーで時系列グラフ単独の表示切替（H キーの全体非表示とは独立）。"""
+        """Gキーで時系列グラフ単独の表示切替（H キーの全体非表示とは独立）。
+        graph_enabled=false ならグラフ widget が無いので no-op。"""
+        if self._graph_x is None:
+            return
         self._graph_visible = not self._graph_visible
         self._graph_x.setVisible(self._graph_visible)
         self._graph_y.setVisible(self._graph_visible)
         logger.info(f"グラフ表示: {'ON' if self._graph_visible else 'OFF'}")
+
+    def _reset_graphs(self) -> None:
+        """両グラフのバッファをリセット（シーク・ソース切替・書出開始/終了で呼ぶ）。
+        graph_enabled=false なら no-op。"""
+        if self._graph_x is not None:
+            self._graph_x.reset()
+            self._graph_y.reset()
 
     def open_background_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -486,8 +508,7 @@ class MainWindow(QMainWindow):
                 source_fps=self._camera.source_fps,
             )
             self._pose_stream.set_seek_gen(self._worker.seek_gen)
-            self._graph_x.reset()
-            self._graph_y.reset()
+            self._reset_graphs()
             logger.info(f"動画ファイル再生: {path}")
         except SourceOpenError as e:
             logger.warning(f"動画ファイル再生失敗: {e}")
@@ -508,8 +529,7 @@ class MainWindow(QMainWindow):
                 source_fps=self._camera.source_fps,
             )
             self._pose_stream.set_seek_gen(self._worker.seek_gen)
-            self._graph_x.reset()
-            self._graph_y.reset()
+            self._reset_graphs()
             logger.info(f"カメラ復帰: device_index={self._camera.device_index}")
         except SourceOpenError as e:
             logger.warning(f"カメラ復帰失敗: {e}")
@@ -535,8 +555,7 @@ class MainWindow(QMainWindow):
         # - グラフ: 時間軸が連続のままだと過去データがそのまま伸びて見える
         # - トレイル: 軌跡が前位置と新位置を直線で結んでしまう
         # - PoseEstimator: VIDEO モードのタイムスタンプ単調増加 & EMA 前回値
-        self._graph_x.reset()
-        self._graph_y.reset()
+        self._reset_graphs()
         if self._mode2 is not None:
             self._mode2.renderer.reset_trail()
         if self._mode3 is not None:
@@ -624,8 +643,7 @@ class MainWindow(QMainWindow):
         # 実行
         try:
             # 書出開始時にグラフバッファをリセット（書出中の動画内時刻 0 から始める）
-            self._graph_x.reset()
-            self._graph_y.reset()
+            self._reset_graphs()
             exporter = VideoExporter(
                 input_path=input_path,
                 output_path=out_path,
@@ -635,7 +653,10 @@ class MainWindow(QMainWindow):
                 progress_cb=on_progress,
                 cancel_check=cancel_check,
                 max_frames=max_frames,
-                graph_widgets=[self._graph_x, self._graph_y],
+                graph_widgets=(
+                    [self._graph_x, self._graph_y]
+                    if self._graph_x is not None else None
+                ),
                 graph_update_cb=self._append_graphs_for_export,
             )
             written, total = exporter.run()
@@ -658,8 +679,7 @@ class MainWindow(QMainWindow):
             # ライブ側は perf_counter ベースで動くため、リセットしないと
             # 次の append で巨大な t（perf_counter() からの絶対秒）に飛び、
             # X 範囲が遠くに飛んでグラフが固まったように見える。
-            self._graph_x.reset()
-            self._graph_y.reset()
+            self._reset_graphs()
 
     # --- Mode3 回転コントロール ----------------------------------------------
 
@@ -705,10 +725,12 @@ class MainWindow(QMainWindow):
         self._estimator.set_smoothing_alpha(alpha)
 
     def _on_graph_scale_changed(self, scale: float) -> None:
-        """グラフ表示サイズの係数を変更する。文字サイズも連動。"""
+        """グラフ表示サイズの係数を変更する。文字サイズも連動。
+        graph_enabled=false でも graph_scale 値だけは保持する（書出時の右上スペース算出に使う）。"""
         self._graph_scale = scale
-        self._graph_x.set_font_scale(scale)
-        self._graph_y.set_font_scale(scale)
+        if self._graph_x is not None:
+            self._graph_x.set_font_scale(scale)
+            self._graph_y.set_font_scale(scale)
         self._update_overlay_positions()
 
     @staticmethod
@@ -742,7 +764,10 @@ class MainWindow(QMainWindow):
         """動画書出ループから呼ばれる。フレーム結果でグラフ X/Y を更新する。
         ライブと違って worker emit が止まるため、書出は自前でグラフを進める。
         t_video は動画内時刻（frame_idx / fps）。
+        graph_enabled=false なら no-op。
         """
+        if self._graph_x is None:
+            return
         x_values, y_values = self._extract_graph_values(results)
         self._graph_x.append(x_values, draw=True, t_override=t_video)
         self._graph_y.append(y_values, draw=True, t_override=t_video)
@@ -865,14 +890,16 @@ class MainWindow(QMainWindow):
             self._debug_label.adjustSize()
 
         # 時系列グラフに両手両足の X / Y 座標（画像座標 [0,1]）
-        x_values, y_values = self._extract_graph_values(results)
-        # 3 フレームに 1 回だけグラフを再描画（バッファ更新は毎フレーム）
-        self._graph_frame_counter = (self._graph_frame_counter + 1) % self._graph_draw_every
-        draw_now = (self._graph_frame_counter == 0)
-        # 動画ファイル時は PoseStream が計算済みの t_video（動画内秒数）、
-        # カメラ時は None → TimeSeriesGraph 側で perf_counter ベースになる。
-        self._graph_x.append(x_values, draw=draw_now, t_override=pf.t_video)
-        self._graph_y.append(y_values, draw=draw_now, t_override=pf.t_video)
+        # graph_enabled=false のときは抽出も含めて丸ごとスキップ（CPU 節約）
+        if self._graph_x is not None:
+            x_values, y_values = self._extract_graph_values(results)
+            # 3 フレームに 1 回だけグラフを再描画（バッファ更新は毎フレーム）
+            self._graph_frame_counter = (self._graph_frame_counter + 1) % self._graph_draw_every
+            draw_now = (self._graph_frame_counter == 0)
+            # 動画ファイル時は PoseStream が計算済みの t_video（動画内秒数）、
+            # カメラ時は None → TimeSeriesGraph 側で perf_counter ベースになる。
+            self._graph_x.append(x_values, draw=draw_now, t_override=pf.t_video)
+            self._graph_y.append(y_values, draw=draw_now, t_override=pf.t_video)
 
         # 動画コントロールパネルの可視性・状態更新
         is_video = self._camera.is_video_file
