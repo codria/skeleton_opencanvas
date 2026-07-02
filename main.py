@@ -40,11 +40,19 @@ def main() -> None:
         height=config.get("camera.height", 720),
         fps=config.get("camera.fps", 30),
     )
+    # カメラ起動失敗は fatal にせず warning に留めて続行する（動画ファイル再生モード）。
+    # ユーザーは V キーまたは「動画選択」ボタンから動画を開いて使える。
+    # C キーまたは「カメラ」ボタンで後から再接続を試みることも可能。
     try:
         camera.start()
     except CameraNotFoundError as e:
-        QMessageBox.critical(None, "起動エラー", f"カメラの起動に失敗しました。\n\n{e}")
-        sys.exit(1)
+        logger.warning(f"カメラ起動失敗（動画ファイル再生モードで続行）: {e}")
+        QMessageBox.warning(
+            None, "カメラ検出失敗",
+            f"カメラを開けませんでした。\n\n{e}\n\n"
+            "動画ファイル再生モードで起動します。\n"
+            "V キーまたは「動画選択」ボタンから動画を開いてください。"
+        )
 
     # PoseEstimator の初期化
     # モデルファイルの候補を自動検索
