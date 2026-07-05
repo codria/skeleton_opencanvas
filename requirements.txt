@@ -9,3 +9,4 @@ PyYAML>=6.0
 Pillow>=10.0.0
 pygltflib>=1.16.0
 pyqtgraph>=0.13.3
+pandas>=2.0.0
