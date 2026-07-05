@@ -39,6 +39,7 @@ class AppSettings(QObject):
     trail_point_size_changed = pyqtSignal(float)
     trail_line_width_changed = pyqtSignal(float)
     trail_max_points_changed = pyqtSignal(int)
+    trail_visible_changed = pyqtSignal(bool)
     overlay_alpha_changed = pyqtSignal(float)
     mode2_size_scale_changed = pyqtSignal(float)
     mode3_speed_changed = pyqtSignal(float)
@@ -119,6 +120,10 @@ class AppSettings(QObject):
     @property
     def trail_max_points(self) -> int:
         return int(self._values["trail_max_points"])
+
+    @property
+    def trail_visible(self) -> bool:
+        return bool(self._values["trail_visible"])
 
     @property
     def overlay_alpha(self) -> float:

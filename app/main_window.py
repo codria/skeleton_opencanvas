@@ -1000,6 +1000,7 @@ class MainWindow(QMainWindow):
         renderer.set_trail_point_size(self._app_settings.trail_point_size)
         renderer.set_trail_line_width(self._app_settings.trail_line_width)
         renderer.set_trail_max_points(self._app_settings.trail_max_points)
+        renderer.set_trail_visible(self._app_settings.trail_visible)
         # マネキン描画スタイル（primitive / mesh / hidden）も復元
         try:
             renderer.set_style(self._app_settings.mannequin_style)
@@ -1020,6 +1021,18 @@ class MainWindow(QMainWindow):
         self._app_settings.set("show_bones",
                                 bool(getattr(self._gl_widget, "show_bones", False)))
         self._app_settings.set("overlay_alpha", float(self._overlay_ctrl.value()))
+        # trail_visible / mannequin_style は renderer が持つので、生きている方から吸い上げる
+        # （両方生きていれば mode2 優先、無ければ既存値のまま）
+        active_renderer = None
+        if self._mode2 is not None:
+            active_renderer = self._mode2.renderer
+        elif self._mode3 is not None:
+            active_renderer = self._mode3.renderer
+        if active_renderer is not None:
+            self._app_settings.set("trail_visible",
+                                    bool(active_renderer.trail_visible))
+            self._app_settings.set("mannequin_style",
+                                    str(active_renderer.style))
 
     def closeEvent(self, event) -> None:
         logger.info("アプリ終了処理を開始します。")

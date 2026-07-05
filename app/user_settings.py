@@ -24,6 +24,7 @@ DEFAULTS: dict = {
     "trail_point_size": 6.0,
     "trail_line_width": 3.0,
     "trail_max_points": 32,
+    "trail_visible": True,
     "overlay_alpha": 1.0,
     "mode2_size_scale": 0.28,
     "mode3_speed": 30.0,
