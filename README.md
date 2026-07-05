@@ -172,6 +172,41 @@ python -m app.tools.extract_csv input.mp4 output.csv --num-poses 2
 World 座標系（腰原点メートル）を同じ CSV に併記する。平滑化・フィルタは
 後処理側で好きに適用できる。
 
+### Long → Wide フォーマット変換
+
+extract_csv デフォルトの Long 形式を Excel 向けの Wide 形式に変換する。
+
+```powershell
+python -m app.tools.long_to_wide input.csv              # in-place 上書き
+python -m app.tools.long_to_wide input.csv output.csv   # 別ファイルに出力
+```
+
+### 動画書き出し（ヘッドレス）
+
+GUI を起動せずに Mode2 の動画書き出しを行う。GUI で調整した見た目
+（マネキンスタイル・トレイル・ボーン・グラフサイズ等）はそのまま
+`user_settings.json` から流用される。
+
+```powershell
+# フル書き出し（<input>_export.mp4 を生成）
+python -m app.tools.export_video input.mp4
+
+# サンプル書き出し（先頭 300 フレームのみ、<input>_sample.mp4）
+python -m app.tools.export_video input.mp4 --sample
+
+# 出力先を指定
+python -m app.tools.export_video input.mp4 -o my_output.mp4
+
+# 任意のフレーム数
+python -m app.tools.export_video input.mp4 --frames 500
+
+# 音声 mux を省略（無音出力）
+python -m app.tools.export_video input.mp4 --no-audio
+
+# フォルダ内の全 mp4 を一括処理
+for f in *.mp4; do python -m app.tools.export_video "$f"; done
+```
+
 ---
 
 ## ドキュメント
