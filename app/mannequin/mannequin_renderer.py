@@ -239,14 +239,22 @@ class MannequinRenderer:
     def style(self) -> str:
         return self._style
 
+    # M キーの循環対象。この順で回る。
+    _STYLE_CYCLE = ("primitive", "mesh", "hidden")
+
     def set_style(self, style: str) -> None:
-        if style not in ("primitive", "mesh"):
+        if style not in self._STYLE_CYCLE:
             raise ValueError(f"unknown style: {style!r}")
         self._style = style
         logger.info(f"MannequinRenderer スタイル: {style}")
 
     def toggle_style(self) -> str:
-        self.set_style("mesh" if self._style == "primitive" else "primitive")
+        """primitive → mesh → hidden → primitive の順で循環する。"""
+        try:
+            idx = self._STYLE_CYCLE.index(self._style)
+        except ValueError:
+            idx = -1
+        self.set_style(self._STYLE_CYCLE[(idx + 1) % len(self._STYLE_CYCLE)])
         return self._style
 
     def load_model(self, gltf_path: str) -> None:
@@ -396,7 +404,10 @@ class MannequinRenderer:
     def _draw_model(self, lms, coord: str = "local") -> None:
         """スタイル × 座標系に応じてマネキンを描画する。
         coord: "world"（実3D・Mode3）/ "raw"（画像座標・Mode2）/ "local"（体中心正規化・フォールバック）
+        style="hidden" ならマネキン本体は描画しない（トレイル等は別経路で描画される）。
         """
+        if self._style == "hidden":
+            return
         if self._style == "primitive":
             if coord == "world":
                 self._draw_primitive_world(lms)

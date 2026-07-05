@@ -50,7 +50,7 @@ MODES = {
 }
 
 GUIDE_TEXT = (
-    "[1/2/3]モード [B]ボーン [M]マネキン [T]Tポーズ [+/-]サイズ\n"
+    "[1/2/3]モード [B]ボーン [M]マネキン切替 [T]Tポーズ [+/-]サイズ\n"
     "[V]動画 [C]カメラ [Space]停止 [L]ループ  "
     "[G]グラフ [H]UI [Q]終了"
 )
@@ -818,22 +818,28 @@ class MainWindow(QMainWindow):
         logger.info(f"T ポーズ表示: {'ON' if self._show_t_pose else 'OFF'}")
 
     def _toggle_mannequin_style(self) -> None:
-        """Mode2/Mode3 のマネキン描画スタイルを切替（primitive ⇄ mesh）。
-        両モードのスタイルを同期させる。
+        """Mode2/Mode3 のマネキン描画スタイルを循環切替。
+        primitive → mesh → hidden → primitive の順で回る。
+        両モードのスタイルを同期させ、AppSettings にも書き戻して永続化する。
+        Mode2/3 未初期化ならスタイル文字列だけ AppSettings で進める。
         """
-        new_style: str | None = None
+        # 現在の値を AppSettings から取得して次に進める
+        cycle = ("primitive", "mesh", "hidden")
+        cur = self._app_settings.mannequin_style
+        try:
+            idx = cycle.index(cur)
+        except ValueError:
+            idx = -1
+        new_style = cycle[(idx + 1) % len(cycle)]
+        # renderer に反映
         if self._mode2 is not None:
-            new_style = self._mode2.renderer.toggle_style()
+            self._mode2.renderer.set_style(new_style)
         if self._mode3 is not None:
-            if new_style is None:
-                new_style = self._mode3.renderer.toggle_style()
-            else:
-                self._mode3.renderer.set_style(new_style)
+            self._mode3.renderer.set_style(new_style)
+        # 永続化 & UI 通知
+        self._app_settings.set("mannequin_style", new_style)
         self._gl_widget.update()
-        if new_style is None:
-            logger.info("マネキンスタイル切替: 対象モード未初期化")
-        else:
-            logger.info(f"マネキンスタイル: {new_style}")
+        logger.info(f"マネキンスタイル切替: {new_style}")
 
     def _adjust_mannequin_scale(self, delta: float) -> None:
         """Mode2/Mode3 のマネキン表示サイズを増減する（同期）。"""
@@ -994,6 +1000,12 @@ class MainWindow(QMainWindow):
         renderer.set_trail_point_size(self._app_settings.trail_point_size)
         renderer.set_trail_line_width(self._app_settings.trail_line_width)
         renderer.set_trail_max_points(self._app_settings.trail_max_points)
+        # マネキン描画スタイル（primitive / mesh / hidden）も復元
+        try:
+            renderer.set_style(self._app_settings.mannequin_style)
+        except ValueError:
+            # 過去互換：未知の値なら primitive にフォールバック
+            renderer.set_style("primitive")
         if include_mode2:
             renderer.set_raw_size_scale(self._app_settings.mode2_size_scale)
 

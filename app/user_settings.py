@@ -28,6 +28,8 @@ DEFAULTS: dict = {
     "mode2_size_scale": 0.28,
     "mode3_speed": 30.0,
     "mode3_angle": 0.0,
+    # M キーで循環するマネキン描画スタイル：primitive / mesh / hidden
+    "mannequin_style": "primitive",
 }
 
 

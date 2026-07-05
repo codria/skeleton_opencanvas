@@ -43,6 +43,7 @@ class AppSettings(QObject):
     mode2_size_scale_changed = pyqtSignal(float)
     mode3_speed_changed = pyqtSignal(float)
     mode3_angle_changed = pyqtSignal(float)
+    mannequin_style_changed = pyqtSignal(str)  # "primitive" | "mesh" | "hidden"
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -134,3 +135,7 @@ class AppSettings(QObject):
     @property
     def mode3_angle(self) -> float:
         return float(self._values["mode3_angle"])
+
+    @property
+    def mannequin_style(self) -> str:
+        return str(self._values["mannequin_style"])
