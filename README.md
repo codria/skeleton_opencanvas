@@ -150,6 +150,30 @@ MP4 として書き出せる。元動画の音声トラックは ffmpeg で自�
 
 ---
 
+## CLI ツール（GUI 不要）
+
+### 動画 → ランドマーク CSV 抽出
+
+`app/tools/extract_csv.py` は mp4 動画から MediaPipe Pose のランドマーク座標を
+CSV に書き出す CLI ツール。GUI は起動しない。
+
+```powershell
+# 1 人・Long フォーマット（pandas 向け、default）
+python -m app.tools.extract_csv input.mp4 output.csv
+
+# 素人 / Excel で見るとき（Wide、1 行 1 フレーム、列がランドマーク別）
+python -m app.tools.extract_csv input.mp4 output.csv --format wide
+
+# 複数人
+python -m app.tools.extract_csv input.mp4 output.csv --num-poses 2
+```
+
+出力は **MediaPipe の生値**（EMA 平滑化なし）。画像座標系（正規化 [0,1]）と
+World 座標系（腰原点メートル）を同じ CSV に併記する。平滑化・フィルタは
+後処理側で好きに適用できる。
+
+---
+
 ## ドキュメント
 
 | ファイル | 内容 |
