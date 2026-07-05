@@ -75,6 +75,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="任意フレーム数まで書き出す（--sample より優先）")
     p.add_argument("--no-audio", action="store_true",
                    help="ffmpeg 音声 mux をスキップして無音で出力")
+    p.add_argument("--csv", default=None,
+                   help="動画と同時に CSV も書き出す（フレームごとのランドマーク）。"
+                        "同時実行なので MediaPipe 推定コストは 1 回で済む。"
+                        "指定時は smoothing_alpha=1.0（生値）に強制される。")
+    p.add_argument("--csv-format", choices=["long", "wide"], default="wide",
+                   help="--csv 時の出力形式（default: wide、Excel 向け）")
     p.add_argument("--config", default="config.yaml",
                    help="システム設定ファイル（default: config.yaml）")
     p.add_argument("-v", "--verbose", action="store_true", help="DEBUG ログ")
@@ -145,12 +151,15 @@ def main(argv: list[str] | None = None) -> int:
         config.get("pose.model_path", "assets/models/pose_landmarker.task")
     )
     logger.info(f"モデル: {model_path}")
+    # --csv 指定時は生値優先（EMA を効かせずに CSV を出す）。
+    # 平滑化を後処理でかけたいユースケースが多いので、この方が扱いやすい。
+    smoothing_alpha = 1.0 if args.csv else config.get("pose.smoothing_alpha", 0.25)
     estimator = PoseEstimator(
         model_path=model_path,
         num_poses=config.get("pose.num_poses", 1),
         min_detection_confidence=config.get("pose.min_detection_confidence", 0.5),
         min_tracking_confidence=config.get("pose.min_tracking_confidence", 0.5),
-        smoothing_alpha=config.get("pose.smoothing_alpha", 0.25),
+        smoothing_alpha=smoothing_alpha,
         center_priority=config.get("pose.center_priority", False),
     )
 
@@ -203,6 +212,42 @@ def main(argv: list[str] | None = None) -> int:
     if mw._graph_x is not None:
         graph_widgets = [mw._graph_x, mw._graph_y]
 
+    # --- CSV 併走の準備（--csv 指定時のみ）---
+    # graph_update_cb は VideoExporter が毎フレーム呼ぶフック。
+    # ここに CSV writer をぶら下げて、同じ推定結果を CSV にも書き出す。
+    # MediaPipe 推定は 1 回で済むので extract_csv を別プロセスで走らせる
+    # よりトータル約 2 倍速い。
+    csv_file = None
+    csv_writer = None
+    csv_write_rows = None
+    csv_frame_idx = [0]
+    if args.csv:
+        import csv as csv_mod
+        from app.tools.extract_csv import (
+            _write_long_header, _write_long_rows,
+            _write_wide_header, _write_wide_rows,
+        )
+        csv_file = open(args.csv, "w", newline="", encoding="utf-8")
+        csv_writer = csv_mod.writer(csv_file)
+        if args.csv_format == "wide":
+            _write_wide_header(csv_writer)
+            csv_write_rows = _write_wide_rows
+        else:
+            _write_long_header(csv_writer)
+            csv_write_rows = _write_long_rows
+        logger.info(f"CSV も併走で書き出し: {args.csv} (format={args.csv_format})")
+
+    original_graph_cb = mw._append_graphs_for_export
+
+    def combined_cb(results, t_video: float) -> None:
+        # まずは既存のグラフ更新
+        original_graph_cb(results, t_video)
+        # CSV 併走
+        if csv_writer is not None:
+            if results:
+                csv_write_rows(csv_writer, csv_frame_idx[0], t_video, results)
+            csv_frame_idx[0] += 1
+
     t_start = time.perf_counter()
     exporter = VideoExporter(
         input_path=args.input,
@@ -214,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         cancel_check=lambda: False,
         max_frames=max_frames,
         graph_widgets=graph_widgets,
-        graph_update_cb=mw._append_graphs_for_export,
+        graph_update_cb=combined_cb,
     )
     # --no-audio: 音声 mux をスキップ（メソッド差し替え）
     if args.no_audio:
@@ -224,10 +269,16 @@ def main(argv: list[str] | None = None) -> int:
         written, total = exporter.run()
     except Exception as e:
         logger.exception(f"書出エラー: {e}")
+        if csv_file is not None:
+            csv_file.close()
         mw.close()
         estimator.release()
         camera.release()
         return 5
+
+    if csv_file is not None:
+        csv_file.close()
+        logger.info(f"CSV 完了: {csv_frame_idx[0]} frames → {args.csv}")
 
     elapsed = time.perf_counter() - t_start
     print(f"\r完了: {written}/{total} frames / {elapsed:.1f}s → {out_path}")
