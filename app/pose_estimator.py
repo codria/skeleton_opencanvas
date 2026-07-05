@@ -38,27 +38,33 @@ class PoseEstimator:
         min_detection_confidence: float,
         min_tracking_confidence: float,
         smoothing_alpha: float = 0.4,
+        center_priority: bool = False,
     ) -> None:
         """MediaPipe Pose Landmarker を初期化する。
 
         Args:
             model_path               : pose_landmarker.task のパス
-            num_poses                : 検出する最大人数
+            num_poses                : ユーザーが最終的に扱いたい人数
             min_detection_confidence : 検出信頼度の閾値
             min_tracking_confidence  : トラッキング信頼度の閾値
             smoothing_alpha          : EMA の追従係数。
                                        1.0 で平滑化なし、0.0 で動かない。
                                        0.4 が初期値（手足のブルブルを抑える）。
+            center_priority          : True にすると内部的に多めに検出して、
+                                       画面中央に近い順にソートしてから num_poses に
+                                       絞る。「外縁部にちらっと写ってる人」を
+                                       選ばせたくない用途向け。
         """
         # 再作成用に保存
         self._model_path = model_path
         self._num_poses = num_poses
         self._min_detection_confidence = min_detection_confidence
         self._min_tracking_confidence = min_tracking_confidence
+        self._center_priority = bool(center_priority)
         # estimate と set_num_poses の排他用
         self._lock = threading.Lock()
 
-        self._landmarker = self._create_landmarker(num_poses)
+        self._landmarker = self._create_landmarker(self._effective_num_poses(num_poses))
         self._frame_timestamp_ms: int = 0
         self._smoothing_alpha: float = max(0.05, min(1.0, smoothing_alpha))
         # person_index → 直前フレームの平滑化済み (image_landmarks, world_landmarks)
@@ -68,8 +74,17 @@ class PoseEstimator:
             f"num_poses={num_poses} "
             f"min_detection={min_detection_confidence} "
             f"min_tracking={min_tracking_confidence} "
-            f"smoothing_alpha={self._smoothing_alpha}"
+            f"smoothing_alpha={self._smoothing_alpha} "
+            f"center_priority={self._center_priority}"
         )
+
+    def _effective_num_poses(self, user_num_poses: int) -> int:
+        """MediaPipe に渡す実効的な num_poses。
+        center_priority=True のときは、後段で中央近い順に絞るため多めに検出する。
+        """
+        if self._center_priority:
+            return max(3, user_num_poses)
+        return user_num_poses
 
     def set_smoothing_alpha(self, alpha: float) -> None:
         """EMA の追従係数を変更する。"""
@@ -107,7 +122,7 @@ class PoseEstimator:
                 self._landmarker.close()
             except Exception as e:
                 logger.warning(f"古い PoseLandmarker close 失敗: {e}")
-            self._landmarker = self._create_landmarker(n)
+            self._landmarker = self._create_landmarker(self._effective_num_poses(n))
             self._num_poses = n
             # トラッキング連続性を切る
             self._frame_timestamp_ms += 10_000
@@ -142,7 +157,31 @@ class PoseEstimator:
             a = self._smoothing_alpha
             world_lists = detection_result.pose_world_landmarks or []
 
-            for person_index, pose_landmarks in enumerate(detection_result.pose_landmarks):
+            # center_priority: 画面中央（0.5, 0.5）に NOSE が近い順にソートしてから
+            # num_poses に絞る。外縁部にちらっと写った人を選ばせない用途向け。
+            pose_landmarks_list = list(detection_result.pose_landmarks)
+            world_lists = list(world_lists)
+            if self._center_priority and len(pose_landmarks_list) > self._num_poses:
+                def _center_dist(pose_lm):
+                    if not pose_lm:
+                        return float("inf")
+                    nose = pose_lm[0]  # index 0 = NOSE
+                    dx = nose.x - 0.5
+                    dy = nose.y - 0.5
+                    return dx * dx + dy * dy
+                order = sorted(
+                    range(len(pose_landmarks_list)),
+                    key=lambda i: _center_dist(pose_landmarks_list[i]),
+                )[: self._num_poses]
+                pose_landmarks_list = [pose_landmarks_list[i] for i in order]
+                world_lists = [
+                    world_lists[i] for i in order if i < len(world_lists)
+                ]
+                # トラッキング連続性は person_index に紐付いているので、順序が
+                # 変わったフレームは EMA を新規扱いにする。
+                self._smoothed.clear()
+
+            for person_index, pose_landmarks in enumerate(pose_landmarks_list):
                 raw_image = [
                     Landmark(
                         x=lm.x,

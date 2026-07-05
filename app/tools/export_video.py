@@ -151,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         min_detection_confidence=config.get("pose.min_detection_confidence", 0.5),
         min_tracking_confidence=config.get("pose.min_tracking_confidence", 0.5),
         smoothing_alpha=config.get("pose.smoothing_alpha", 0.25),
+        center_priority=config.get("pose.center_priority", False),
     )
 
     # ---- MainWindow をヘッドレスに作って GL context を確立 ----

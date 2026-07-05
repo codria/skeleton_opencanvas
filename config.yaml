@@ -18,6 +18,9 @@ pose:
   model_path: "assets/models/pose_landmarker.task"
   # ランドマーク平滑化（指数移動平均）の追従係数。1.0=平滑化なし、小さいほど滑らか
   smoothing_alpha: 0.25
+  # true にすると、内部的に多めに検出してから画面中央（NOSE 基準）に近い順に
+  # 並べ替えて num_poses に絞る。外縁部にちらっと写った人物を優先されないように。
+  center_priority: true
 
 assets:
   # Mode2 / Mode3 共通のキャラクターモデル（GLTF）。
