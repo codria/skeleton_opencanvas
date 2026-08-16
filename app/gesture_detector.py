@@ -9,9 +9,9 @@ Mode4（体験モード）用のジェスチャー検出。
 イベント名:
     right_arm_up   : 右手首が右肩より上がった瞬間
     left_arm_up    : 左手首が左肩より上がった瞬間
-    right_step     : 右足首が左足首より下（接地側）に切り替わった瞬間
-    left_step      : 左足首が右足首より下（接地側）に切り替わった瞬間
-                     ※ その場足踏みでも歩行でも交互に鳴る
+    right_step     : 右足首 Y が急に下がった瞬間（右足の着地）
+    left_step      : 左足首 Y が急に下がった瞬間（左足の着地）
+                     ※ 各足独立に判定。片足だけの足踏みでも連続発火する。
     crouch         : 静止しゃがみ姿勢（腰と足首・腰と肩の縦距離が両方小さい）
 
 状態プロパティ（魔法モード側で参照）:
@@ -44,9 +44,9 @@ class GestureConfig:
     # （画像座標は上端 0.0 下端 1.0 なので、上に居るとは Y が小さい）
     arm_up_on: float = 0.03
     arm_up_off: float = 0.0
-    # 歩行：足首 Y 差（右-左）が閾値以上に開いたら「その側が下」
-    # 拮抗時のチャタリング防止のためヒステリシス。
-    step_diff_on: float = 0.03
+    # 歩行：各足首 Y が前フレームより閾値以上下がった瞬間を「その足の着地」
+    # として発火する。片足だけの足踏みでも連続発火するよう独立判定。
+    step_delta_threshold: float = 0.02
     # しゃがみ：腰-足首 と 腰-肩 の縦距離が両方これ未満
     crouch_hip_ankle: float = 0.28
     crouch_shoulder_hip: float = 0.20
@@ -60,8 +60,9 @@ class _State:
     left_arm_up: bool = False
     crouching: bool = False
     cooldowns: dict = field(default_factory=dict)
-    # 現在どちらの足が下（接地側）と判定されているか: "right" / "left" / None
-    foot_down_side: Optional[str] = None
+    # 前フレームの足首 Y（各足独立に Δ 監視するため）
+    prev_ra_y: Optional[float] = None
+    prev_la_y: Optional[float] = None
 
 
 class GestureDetector:
@@ -127,20 +128,27 @@ class GestureDetector:
             elif st.left_arm_up and wy > sy - cfg.arm_up_off:
                 st.left_arm_up = False
 
-        # 歩行：左右足首 Y の差で「今どちらが下（接地側）か」を判定して、
-        # 切り替わった瞬間に right_step / left_step を発火する。
-        # その場足踏みでも歩行でも交互に鳴る。
-        if lms[_RA].visibility >= vis and lms[_LA].visibility >= vis:
-            diff = lms[_RA].y - lms[_LA].y   # 正 = 右足首が下
-            new_side: Optional[str] = None
-            if diff > cfg.step_diff_on:
-                new_side = "right"
-            elif -diff > cfg.step_diff_on:
-                new_side = "left"
-            # 拮抗（|diff| <= step_diff_on）のときは切り替えなし＝連打防止
-            if new_side is not None and new_side != st.foot_down_side:
-                st.foot_down_side = new_side
-                self._fire(events, "right_step" if new_side == "right" else "left_step")
+        # 歩行：各足首 Y の Δ を独立に監視。
+        # 前フレームより閾値以上下がった＝その足が着地した瞬間として発火。
+        # 相対比較ではないので「右足だけ足踏み」でも right_step が連続で鳴る。
+        if lms[_RA].visibility >= vis:
+            ra_y = lms[_RA].y
+            if st.prev_ra_y is not None:
+                delta = ra_y - st.prev_ra_y   # 正 = 下方向（着地）
+                if delta > cfg.step_delta_threshold:
+                    self._fire(events, "right_step")
+            st.prev_ra_y = ra_y
+        else:
+            st.prev_ra_y = None
+        if lms[_LA].visibility >= vis:
+            la_y = lms[_LA].y
+            if st.prev_la_y is not None:
+                delta = la_y - st.prev_la_y
+                if delta > cfg.step_delta_threshold:
+                    self._fire(events, "left_step")
+            st.prev_la_y = la_y
+        else:
+            st.prev_la_y = None
 
         # しゃがみ：肩・腰・足首の縦距離が両方小さいか
         hip_y: Optional[float] = None
