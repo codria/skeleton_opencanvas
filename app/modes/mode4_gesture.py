@@ -62,12 +62,13 @@ class Mode4Gesture(BaseMode):
     _MAGIC_FIREBALL_MAX: float = 0.16
     # 火球サイズはフレーム間 lerp で滑らかに（1.0 で即時、0.2 でゆっくり追従）
     _MAGIC_FIREBALL_LERP: float = 0.25
-    # 発射速度：charging 中の両手中央位置履歴長・見返す過去フレーム数・スケール
+    # 発射トリガー：charging 中に両手中央が LOOKBACK フレームで
+    # LAUNCH_SPEED 以上動いたら発射。そのときの位置差 × VEL_SCALE を初速に。
+    # LOOKBACK は 30fps で ~100ms（3 フレーム）を目安。
     _MAGIC_HAND_HISTORY: int = 10
-    _MAGIC_VEL_LOOKBACK: int = 5
-    _MAGIC_VEL_SCALE: float = 0.5
-    _MAGIC_MIN_SPEED: float = 0.01     # これ未満なら「上向き」フォールバック
-    _MAGIC_FALLBACK_VY: float = -0.025  # 履歴不足時の default 速度（上向き）
+    _MAGIC_LAUNCH_LOOKBACK: int = 3
+    _MAGIC_LAUNCH_SPEED: float = 0.04
+    _MAGIC_VEL_SCALE: float = 0.7
     _MAGIC_FLY_FRAMES: int = 25
 
     def __init__(self, config) -> None:
@@ -229,7 +230,9 @@ class Mode4Gesture(BaseMode):
         """魔法の状態機械更新 + 火玉描画。魔法モード独自の判定ロジック：
         - 構え判定：両手首が「肩から腰の 20% 下ライン」より上（腕が疲れない緩めの閾値）
         - 火球サイズ：両手首の距離に比例（大きく広げると大きな火球）
-        - 発射速度：charging 中の両手中央位置履歴から Δ ベクトルを取って初速化
+        - 発射トリガー：charging 中に両手中央を LAUNCH_SPEED 以上のスピードで振ったら発射。
+          そのスイングベクトル × VEL_SCALE を初速に。
+        - キャンセル：スイングなしで構えを解除したら火球を発射せず IDLE に戻す。
         """
         # ---- ランドマークから必要情報を抽出 ----
         LS, RS = 11, 12
@@ -286,15 +289,21 @@ class Mode4Gesture(BaseMode):
                         hand_width * self._MAGIC_FIREBALL_SCALE),
                 )
                 self._magic_size += (target - self._magic_size) * self._MAGIC_FIREBALL_LERP
-            if not charge_pose:
-                # 構え解除＝発射
+            # スイング速度が閾値以上なら発射（構えが解けていても解けていなくても）
+            launch_vel = self._check_swing_launch()
+            if launch_vel is not None:
                 self._magic_state = self._MAGIC_FLYING
                 self._magic_frames = 0
-                self._magic_vx, self._magic_vy = self._compute_launch_velocity()
+                self._magic_vx, self._magic_vy = launch_vel
                 logger.info(
                     f"[Mode4/魔法] 発射 size={self._magic_size:.3f} "
                     f"v=({self._magic_vx:+.3f}, {self._magic_vy:+.3f})"
                 )
+            elif not charge_pose:
+                # 振らずに構えだけ解除 → キャンセル（発射音は鳴らさず charging 音だけフェード）
+                self._magic_state = self._MAGIC_IDLE
+                self._sound_bank.fadeout("magic_charge", ms=200)
+                logger.info("[Mode4/魔法] キャンセル（スイングなし）")
 
         elif self._magic_state == self._MAGIC_FLYING:
             self._magic_x += self._magic_vx
@@ -320,23 +329,23 @@ class Mode4Gesture(BaseMode):
         if self._magic_state != self._MAGIC_IDLE:
             self._draw_fireball(vx, vy, vw, vh)
 
-    def _compute_launch_velocity(self) -> tuple[float, float]:
-        """charging 中の両手中央位置履歴から発射速度ベクトルを算出。
-        直近 _MAGIC_VEL_LOOKBACK フレーム前 → 現在 の差 × スケールを速度に。
-        履歴不足・移動量が微小なら上向きにフォールバック。
+    def _check_swing_launch(self) -> tuple[float, float] | None:
+        """charging 中に毎フレーム呼ぶ。両手中央の LOOKBACK フレーム間位置差の
+        大きさが LAUNCH_SPEED を超えたら (vx, vy) を返す（＝発射）。
+        まだ振られていない・履歴不足なら None（＝charging 継続）。
         """
         h = self._magic_hand_history
-        if len(h) >= 2:
-            n = min(self._MAGIC_VEL_LOOKBACK, len(h) - 1)
-            x0, y0 = h[-1 - n]
-            x1, y1 = h[-1]
-            vx = (x1 - x0) * self._MAGIC_VEL_SCALE
-            vy = (y1 - y0) * self._MAGIC_VEL_SCALE
-            speed = (vx * vx + vy * vy) ** 0.5
-            if speed >= self._MAGIC_MIN_SPEED:
-                return vx, vy
-        # 履歴不足 or ほぼ静止 → 上向きにフォールバック
-        return 0.0, self._MAGIC_FALLBACK_VY
+        if len(h) < 2:
+            return None
+        n = min(self._MAGIC_LAUNCH_LOOKBACK, len(h) - 1)
+        x0, y0 = h[-1 - n]
+        x1, y1 = h[-1]
+        dx = x1 - x0
+        dy = y1 - y0
+        speed = (dx * dx + dy * dy) ** 0.5
+        if speed < self._MAGIC_LAUNCH_SPEED:
+            return None
+        return dx * self._MAGIC_VEL_SCALE, dy * self._MAGIC_VEL_SCALE
 
     def _draw_fireball(self, vx, vy, vw, vh) -> None:
         """火玉/爆発を描く。オレンジ色の点で表現（サイズ = 半径）。"""
