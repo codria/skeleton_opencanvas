@@ -342,13 +342,18 @@ class MainWindow(QMainWindow):
         # 時系列グラフ：右上に X グラフ、その下に Y グラフ
         # 基準サイズ 360x180 に係数を掛けた固定サイズ（ウィンドウサイズ非追従）
         # graph_enabled=false なら widget が None なので setGeometry は skip
+        # Mode4 は Y グラフだけ（X グラフは非表示、Y を上に単独配置）
         graph_w = max(80, int(360 * self._graph_scale))
         graph_h = max(40, int(180 * self._graph_scale))
         if self._graph_x is not None:
+            x_visible = self._graph_visible and self._current_mode_id != 4
+            y_visible = self._graph_visible
+            self._graph_x.setVisible(x_visible)
+            self._graph_y.setVisible(y_visible)
             self._graph_x.setGeometry(gw - graph_w - 10, 10, graph_w, graph_h)
-            self._graph_y.setGeometry(
-                gw - graph_w - 10, 10 + graph_h + 8, graph_w, graph_h
-            )
+            # X が非表示なら Y を上（10 px）に、表示なら X の下に配置
+            y_top = 10 if not x_visible else 10 + graph_h + 8
+            self._graph_y.setGeometry(gw - graph_w - 10, y_top, graph_w, graph_h)
         # 後続レイアウトで「グラフの下」基準値として 2 段の合計を保持
         graph_h = graph_h * 2 + 8
 
@@ -491,12 +496,14 @@ class MainWindow(QMainWindow):
 
     def _toggle_graph(self) -> None:
         """Gキーで時系列グラフ単独の表示切替（H キーの全体非表示とは独立）。
-        graph_enabled=false ならグラフ widget が無いので no-op。"""
+        graph_enabled=false ならグラフ widget が無いので no-op。
+        表示/位置決定は _update_overlay_positions に集約（Mode4 は Y だけ等の
+        モード別分岐を含むため）。
+        """
         if self._graph_x is None:
             return
         self._graph_visible = not self._graph_visible
-        self._graph_x.setVisible(self._graph_visible)
-        self._graph_y.setVisible(self._graph_visible)
+        self._update_overlay_positions()
         logger.info(f"グラフ表示: {'ON' if self._graph_visible else 'OFF'}")
 
     def _toggle_mode4_sub(self) -> None:
