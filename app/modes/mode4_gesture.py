@@ -65,10 +65,13 @@ class Mode4Gesture(BaseMode):
     # 発射トリガー：charging 中に両手中央が LOOKBACK フレームで
     # LAUNCH_SPEED 以上動いたら発射。そのときの位置差 × VEL_SCALE を初速に。
     # LOOKBACK は 30fps で ~100ms（3 フレーム）を目安。
+    # 但し charging 開始から CHARGE_MIN_FRAMES は発射禁止：チャージのために
+    # 腕を上げる動作でいきなり撃ってしまうのを防ぐ猶予期間。
     _MAGIC_HAND_HISTORY: int = 10
     _MAGIC_LAUNCH_LOOKBACK: int = 3
     _MAGIC_LAUNCH_SPEED: float = 0.04
     _MAGIC_VEL_SCALE: float = 0.7
+    _MAGIC_CHARGE_MIN_FRAMES: int = 8
     _MAGIC_FLY_FRAMES: int = 25
 
     def __init__(self, config) -> None:
@@ -275,10 +278,16 @@ class Mode4Gesture(BaseMode):
                 self._magic_x = hand_x
                 self._magic_y = hand_y
                 self._magic_size = self._MAGIC_FIREBALL_MIN
+                self._magic_frames = 0
+                # 腕を上げてきた履歴はここで捨て、charging 中の動きだけを
+                # 発射スイング判定の対象にする（現フレームだけ再挿入）
+                self._magic_hand_history.clear()
+                self._magic_hand_history.append((hand_x, hand_y))
                 self._sound_bank.play("magic_charge")
                 logger.info("[Mode4/魔法] charging 開始")
 
         elif self._magic_state == self._MAGIC_CHARGING:
+            self._magic_frames += 1
             if hand_x is not None:
                 self._magic_x = hand_x
                 self._magic_y = hand_y
@@ -289,8 +298,10 @@ class Mode4Gesture(BaseMode):
                         hand_width * self._MAGIC_FIREBALL_SCALE),
                 )
                 self._magic_size += (target - self._magic_size) * self._MAGIC_FIREBALL_LERP
-            # スイング速度が閾値以上なら発射（構えが解けていても解けていなくても）
-            launch_vel = self._check_swing_launch()
+            # 猶予フレームを過ぎたらスイング判定 → 閾値超で発射
+            launch_vel = None
+            if self._magic_frames >= self._MAGIC_CHARGE_MIN_FRAMES:
+                launch_vel = self._check_swing_launch()
             if launch_vel is not None:
                 self._magic_state = self._MAGIC_FLYING
                 self._magic_frames = 0
