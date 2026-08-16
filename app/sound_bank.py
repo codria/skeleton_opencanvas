@@ -111,8 +111,8 @@ class SoundBank:
             return False
 
     def stop(self, key: str) -> bool:
-        """key に対応する音源の再生を停止する（同時再生されている全チャンネル分）。
-        腕を下ろしたら音を止めたい系のジェスチャー用。
+        """key に対応する音源を即時停止する（同時再生されている全チャンネル分）。
+        ぶつ切りで止まるので、自然に止めたい場合は fadeout() を使う。
         """
         if not self._enabled:
             return False
@@ -124,6 +124,22 @@ class SoundBank:
             return True
         except Exception as e:
             logger.warning(f"音停止失敗 key={key}: {e}")
+            return False
+
+    def fadeout(self, key: str, ms: int = 300) -> bool:
+        """key に対応する音源を ms ミリ秒かけて減衰停止する。
+        pygame.mixer.Sound.fadeout() の薄いラッパー。
+        """
+        if not self._enabled:
+            return False
+        s = self._sounds.get(key)
+        if s is None:
+            return False
+        try:
+            s.fadeout(int(ms))
+            return True
+        except Exception as e:
+            logger.warning(f"音フェード失敗 key={key}: {e}")
             return False
 
     def release(self) -> None:

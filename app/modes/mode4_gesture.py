@@ -92,9 +92,9 @@ class Mode4Gesture(BaseMode):
         logger.info(f"モード4（体験）開始 サブモード={self._sub_mode}")
 
     def on_mode_exit(self) -> None:
-        # 継続再生中の右腕ドラムロール音は止めておく
+        # 継続再生中の右腕ドラムロール音は短くフェードして止める
         # （左腕シンバルは短音なので放置で自然に減衰）
-        self._sound_bank.stop("right_arm_up")
+        self._sound_bank.fadeout("right_arm_up", ms=150)
         logger.info("モード4（体験）終了")
 
     def draw(self, frame, results, width: int, height: int) -> None:
@@ -195,11 +195,11 @@ class Mode4Gesture(BaseMode):
             if self._sound_bank.play(e):
                 logger.info(f"[Mode4/楽器] {e} 発火")
 
-        # 終了側：右腕のみ、下ろした瞬間に停止（ドラムロールの連打防止）
+        # 終了側：右腕のみ、下ろした瞬間に減衰停止（ぶつ切りは違和感が強いので fadeout）
         cur_r = self._detector.right_arm_up
         if self._prev_right_arm_up and not cur_r:
-            if self._sound_bank.stop("right_arm_up"):
-                logger.info("[Mode4/楽器] right_arm_up 停止")
+            if self._sound_bank.fadeout("right_arm_up", ms=300):
+                logger.info("[Mode4/楽器] right_arm_up fadeout")
         self._prev_right_arm_up = cur_r
         # 左腕は 1 発鳴らしっぱなしで OK（履歴だけ更新）
         self._prev_left_arm_up = self._detector.left_arm_up
@@ -334,8 +334,8 @@ class Mode4Gesture(BaseMode):
 
     def set_sub_mode(self, sub: str) -> None:
         if sub in self.SUB_MODES:
-            # サブモード切替時も継続音（右腕ドラムロール）を止めておく
-            self._sound_bank.stop("right_arm_up")
+            # サブモード切替時も継続音（右腕ドラムロール）を短くフェードして止める
+            self._sound_bank.fadeout("right_arm_up", ms=150)
             self._prev_right_arm_up = False
             self._prev_left_arm_up = False
             self._sub_mode = sub
