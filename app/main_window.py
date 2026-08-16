@@ -457,6 +457,7 @@ class MainWindow(QMainWindow):
         self._update_mode_label()
         self._update_overlay_positions()
         self._update_buttons()
+        logger.info(f"モード切り替え: {mode_id}")
 
     def _update_mode_label(self) -> None:
         """モード名ラベルを現在モード + サブモード情報付きで更新する。"""
@@ -464,7 +465,6 @@ class MainWindow(QMainWindow):
         if self._current_mode_id == 4 and self._mode4 is not None:
             base = f"{base}（{self._mode4.sub_mode_label}）"
         self._mode_label.setText(base)
-        logger.info(f"モード切り替え: {mode_id}")
 
     def _toggle_ui(self) -> None:
         """Hキーでモード名・ガイド・デバッグ・左側スライダー群を切り替える。
