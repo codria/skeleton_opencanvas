@@ -31,6 +31,8 @@ DEFAULTS: dict = {
     "mode3_angle": 0.0,
     # M キーで循環するマネキン描画スタイル：primitive / mesh / hidden
     "mannequin_style": "primitive",
+    # Mode4（体験モード）のサブモード：instrument / magic
+    "mode4_sub_mode": "instrument",
 }
 
 

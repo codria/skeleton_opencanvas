@@ -26,6 +26,7 @@ from app.video_export import VideoExporter, ExportCancelled
 from app.modes.mode1_overlay import Mode1Overlay
 from app.modes.mode2_mannequin import Mode2Mannequin
 from app.modes.mode3_3d import Mode3D
+from app.modes.mode4_gesture import Mode4Gesture
 from app.app_settings import AppSettings
 from app.pose_stream import PoseStream, PoseFrame
 from app.ui.control_panels import (
@@ -47,10 +48,11 @@ MODES = {
     1: "モード1：オーバーレイ",
     2: "モード2：マネキン",
     3: "モード3：3Dキャラクター",
+    4: "モード4：体験",
 }
 
 GUIDE_TEXT = (
-    "[1/2/3]モード [B]ボーン [M]マネキン切替 [T]Tポーズ [+/-]サイズ\n"
+    "[1/2/3/4]モード [B]ボーン [M]マネキン切替 [S]体験切替 [T]Tポーズ [+/-]サイズ\n"
     "[V]動画 [C]カメラ [Space]停止 [L]ループ  "
     "[G]グラフ [H]UI [Q]終了"
 )
@@ -94,8 +96,9 @@ class MainWindow(QMainWindow):
         self._mode1: Mode1Overlay | None = None
         self._mode2: Mode2Mannequin | None = None
         self._mode3: Mode3D | None = None
+        self._mode4: Mode4Gesture | None = None
 
-        self.setWindowTitle("AIスケルトン体験デモ")
+        self.setWindowTitle("AIスケルトン体験デモ  -  Created by Maeda")
         w = config.get("display.width", 1280)
         h = config.get("display.height", 720)
         self.resize(w, h)
@@ -118,23 +121,25 @@ class MainWindow(QMainWindow):
         self._btn1 = QPushButton("1: オーバーレイ")
         self._btn2 = QPushButton("2: マネキン")
         self._btn3 = QPushButton("3: 3Dキャラ")
+        self._btn4 = QPushButton("4: 体験")
         self._btn_video = QPushButton("動画選択")
         self._btn_camera = QPushButton("カメラ")
         self._btn_bg = QPushButton("背景選択")
 
-        for btn in [self._btn1, self._btn2, self._btn3]:
+        for btn in [self._btn1, self._btn2, self._btn3, self._btn4]:
             btn.setCheckable(True)
             btn.setStyleSheet(BTN_STYLE)
         for btn in [self._btn_video, self._btn_camera, self._btn_bg]:
             btn.setStyleSheet(BTN_STYLE)
         # ボタンにフォーカスを残さない（Space/L キーをグローバル扱いするため）
-        for btn in [self._btn1, self._btn2, self._btn3,
+        for btn in [self._btn1, self._btn2, self._btn3, self._btn4,
                     self._btn_video, self._btn_camera, self._btn_bg]:
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self._btn1.clicked.connect(lambda: self._on_btn_click(1))
         self._btn2.clicked.connect(lambda: self._on_btn_click(2))
         self._btn3.clicked.connect(lambda: self._on_btn_click(3))
+        self._btn4.clicked.connect(lambda: self._on_btn_click(4))
         self._btn_video.clicked.connect(self.open_video_dialog)
         self._btn_camera.clicked.connect(self.restore_camera)
         self._btn_bg.clicked.connect(self.open_background_dialog)
@@ -142,6 +147,7 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(self._btn1)
         panel_layout.addWidget(self._btn2)
         panel_layout.addWidget(self._btn3)
+        panel_layout.addWidget(self._btn4)
         panel_layout.addStretch()
         panel_layout.addWidget(self._btn_video)
         panel_layout.addWidget(self._btn_camera)
@@ -405,6 +411,7 @@ class MainWindow(QMainWindow):
         self._btn1.setChecked(self._current_mode_id == 1)
         self._btn2.setChecked(self._current_mode_id == 2)
         self._btn3.setChecked(self._current_mode_id == 3)
+        self._btn4.setChecked(self._current_mode_id == 4)
 
     def _on_btn_click(self, mode_id: int) -> None:
         self.switch_mode(mode_id)
@@ -432,13 +439,31 @@ class MainWindow(QMainWindow):
                 self._apply_user_settings_to_renderer(self._mode3.renderer,
                                                       include_mode2=False)
             self._gl_widget.set_mode(self._mode3)
+        elif mode_id == 4:
+            if self._mode4 is None:
+                self._mode4 = Mode4Gesture(self._config)
+                # 前回終了時のサブモードを AppSettings から復元（永続化）
+                try:
+                    self._mode4.set_sub_mode(
+                        self._app_settings.get("mode4_sub_mode")
+                    )
+                except Exception:
+                    pass
+            self._gl_widget.set_mode(self._mode4)
         else:
             return
 
         self._current_mode_id = mode_id
-        self._mode_label.setText(MODES[mode_id])
+        self._update_mode_label()
         self._update_overlay_positions()
         self._update_buttons()
+
+    def _update_mode_label(self) -> None:
+        """モード名ラベルを現在モード + サブモード情報付きで更新する。"""
+        base = MODES.get(self._current_mode_id, "")
+        if self._current_mode_id == 4 and self._mode4 is not None:
+            base = f"{base}（{self._mode4.sub_mode_label}）"
+        self._mode_label.setText(base)
         logger.info(f"モード切り替え: {mode_id}")
 
     def _toggle_ui(self) -> None:
@@ -473,6 +498,16 @@ class MainWindow(QMainWindow):
         self._graph_x.setVisible(self._graph_visible)
         self._graph_y.setVisible(self._graph_visible)
         logger.info(f"グラフ表示: {'ON' if self._graph_visible else 'OFF'}")
+
+    def _toggle_mode4_sub(self) -> None:
+        """Sキーで Mode4 のサブモード循環切替（Mode4 アクティブ時のみ有効）。"""
+        if self._mode4 is None:
+            return
+        new_sub = self._mode4.toggle_sub_mode()
+        self._app_settings.set("mode4_sub_mode", new_sub)
+        if self._current_mode_id == 4:
+            self._update_mode_label()
+        self._gl_widget.update()
 
     def _reset_graphs(self) -> None:
         """両グラフのバッファをリセット（シーク・ソース切替・書出開始/終了で呼ぶ）。
@@ -967,6 +1002,10 @@ class MainWindow(QMainWindow):
             self.switch_mode(2)
         elif key == Qt.Key.Key_3:
             self.switch_mode(3)
+        elif key == Qt.Key.Key_4:
+            self.switch_mode(4)
+        elif key == Qt.Key.Key_S:
+            self._toggle_mode4_sub()
         elif key == Qt.Key.Key_H:
             self._toggle_ui()
         elif key == Qt.Key.Key_G:
@@ -1033,6 +1072,8 @@ class MainWindow(QMainWindow):
                                     bool(active_renderer.trail_visible))
             self._app_settings.set("mannequin_style",
                                     str(active_renderer.style))
+        if self._mode4 is not None:
+            self._app_settings.set("mode4_sub_mode", self._mode4.sub_mode)
 
     def closeEvent(self, event) -> None:
         logger.info("アプリ終了処理を開始します。")

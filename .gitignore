@@ -10,6 +10,9 @@ sample_vid/
 # 端末ごとのユーザー設定（スライダー値の永続化）
 user_settings.json
 
+# 効果音ファイル（soundeffect-lab.info 等の利用規約により再配布不可、各端末で再取得）
+assets/sounds/
+
 # Python キャッシュ
 __pycache__/
 *.pyc
