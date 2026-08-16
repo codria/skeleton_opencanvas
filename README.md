@@ -27,10 +27,26 @@ MediaPipe + PyQt6 + OpenGL によるリアルタイム骨格推定デモアプ�
 
 ### 1. リポジトリの取得
 
+#### A) git を使う場合
+
 ```powershell
 git clone https://github.com/codria/skeleton_opencanvas.git
 cd skeleton_opencanvas
 ```
+
+#### B) git を入れていない場合（ZIP ダウンロード）
+
+1. ブラウザで <https://github.com/codria/skeleton_opencanvas> を開く。
+2. 緑の **`Code`** ボタン → **`Download ZIP`** をクリックして
+   `skeleton_opencanvas-main.zip` を任意の場所に保存する。
+3. ZIP を右クリック → **`すべて展開`** で解凍する（PowerShell から
+   `Expand-Archive skeleton_opencanvas-main.zip .` でも可）。
+4. 展開されたフォルダ名が `skeleton_opencanvas-main` になっているので、
+   お好みで `skeleton_opencanvas` にリネームしてから、以降の作業は
+   そのフォルダ内で行う。
+
+ZIP 版では以後の更新（`git pull`）が使えないので、新版が出た際は
+同じ手順で再ダウンロードする。
 
 ### 2. Python 環境の作成（どちらか一方）
 
