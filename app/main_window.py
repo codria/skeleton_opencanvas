@@ -293,6 +293,9 @@ class MainWindow(QMainWindow):
         # worker → PoseStream → MainWindow の流れ。
         # PoseStream が seek_gen 弾きと t_video 計算をやってくれる。
         self._worker.frame_ready.connect(self._pose_stream.push)
+        # 起動時に mirror_display を復元し、以後は AppSettings 経由で反映
+        self._worker.set_mirror(self._app_settings.mirror_display)
+        self._app_settings.mirror_display_changed.connect(self._worker.set_mirror)
         self._worker.start()
 
         # デフォルトモード
@@ -859,6 +862,12 @@ class MainWindow(QMainWindow):
         self._gl_widget.update()
         logger.info(f"T ポーズ表示: {'ON' if self._show_t_pose else 'OFF'}")
 
+    def _toggle_mirror(self) -> None:
+        """画面全体の鏡表示 ON/OFF。AppSettings 経由で永続化＋ワーカーに反映。"""
+        new_val = not self._app_settings.mirror_display
+        self._app_settings.set("mirror_display", new_val)
+        logger.info(f"鏡表示: {'ON' if new_val else 'OFF'}")
+
     def _toggle_mannequin_style(self) -> None:
         """Mode2/Mode3 のマネキン描画スタイルを循環切替。
         primitive → mesh → hidden → primitive の順で回る。
@@ -1031,6 +1040,8 @@ class MainWindow(QMainWindow):
             self._toggle_mannequin_style()
         elif key == Qt.Key.Key_T:
             self._toggle_t_pose()
+        elif key == Qt.Key.Key_F:
+            self._toggle_mirror()
         elif key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self._adjust_scale(+0.1)
         elif key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):

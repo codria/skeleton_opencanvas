@@ -33,6 +33,9 @@ DEFAULTS: dict = {
     "mannequin_style": "primitive",
     # Mode4（体験モード）のサブモード：instrument / magic
     "mode4_sub_mode": "instrument",
+    # 画面全体を左右反転（鏡表示）。カメラ入力を推定前に flip するので、
+    # 骨格・グラフ・魔法エフェクトすべて自動的に mirror される。
+    "mirror_display": False,
 }
 
 

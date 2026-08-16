@@ -45,6 +45,7 @@ class AppSettings(QObject):
     mode3_speed_changed = pyqtSignal(float)
     mode3_angle_changed = pyqtSignal(float)
     mannequin_style_changed = pyqtSignal(str)  # "primitive" | "mesh" | "hidden"
+    mirror_display_changed = pyqtSignal(bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -144,3 +145,7 @@ class AppSettings(QObject):
     @property
     def mannequin_style(self) -> str:
         return str(self._values["mannequin_style"])
+
+    @property
+    def mirror_display(self) -> bool:
+        return bool(self._values["mirror_display"])

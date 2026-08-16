@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import time
 import threading
+import cv2
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -40,6 +41,9 @@ class CaptureWorker(QThread):
         self._frame_lock = threading.Lock()
         # シーク世代（メインスレッドが古い emit を弾くために使う）
         self._seek_gen: int = 0
+        # 画面全体の鏡表示。カメラ取得直後に cv2.flip して、推定・表示両方に
+        # 適用する。python bool 単純読み出しは atomic なので lock 不要。
+        self._mirror: bool = False
 
     def _camera_loop(self) -> None:
         """カメラ取得専用スレッド。常時フレームを取得してバッファを更新する。
@@ -58,6 +62,10 @@ class CaptureWorker(QThread):
                 # ループ OFF EOF 等で paused=True になる場合あり
                 time.sleep(0.01)
                 continue
+            # mirror が ON なら左右反転（cv2.flip flipCode=1）。
+            # ここで flip すると推定・表示・ジェスチャー全てが自動で mirror される。
+            if self._mirror:
+                frame = cv2.flip(frame, 1)
             # read 直後の frame_pos は「次に読むフレーム」を指すので、-1 でこのフレームの ID。
             # カメラ入力時は camera.frame_pos が常に 0 を返すので -1 にして区別する。
             if self._camera.is_video_file:
@@ -129,6 +137,10 @@ class CaptureWorker(QThread):
     @property
     def seek_gen(self) -> int:
         return self._seek_gen
+
+    def set_mirror(self, enabled: bool) -> None:
+        """画面全体の鏡表示 ON/OFF。カメラ取得ループが次回フレームから拾う。"""
+        self._mirror = bool(enabled)
 
     def switch_source(self, source: int | str) -> None:
         """映像ソースを切替し、PoseEstimator のタイムスタンプもジャンプさせる。
