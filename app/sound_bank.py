@@ -110,6 +110,22 @@ class SoundBank:
             logger.warning(f"音再生失敗 key={key}: {e}")
             return False
 
+    def stop(self, key: str) -> bool:
+        """key に対応する音源の再生を停止する（同時再生されている全チャンネル分）。
+        腕を下ろしたら音を止めたい系のジェスチャー用。
+        """
+        if not self._enabled:
+            return False
+        s = self._sounds.get(key)
+        if s is None:
+            return False
+        try:
+            s.stop()
+            return True
+        except Exception as e:
+            logger.warning(f"音停止失敗 key={key}: {e}")
+            return False
+
     def release(self) -> None:
         if not self._enabled:
             return

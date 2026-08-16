@@ -73,6 +73,10 @@ class Mode4Gesture(BaseMode):
         self._charge_hand_x: float | None = None
         self._charge_hand_y: float | None = None
 
+        # 楽器モード：腕下ろしで音を止めるための前フレーム状態
+        self._prev_right_arm_up: bool = False
+        self._prev_left_arm_up: bool = False
+
     # --- BaseMode 実装 -------------------------------------------------------
 
     def initialize(self) -> None:
@@ -83,9 +87,14 @@ class Mode4Gesture(BaseMode):
         # 状態リセット（前回の魔法状態などを持ち越さない）
         self._detector.reset()
         self._magic_state = self._MAGIC_IDLE
+        self._prev_right_arm_up = False
+        self._prev_left_arm_up = False
         logger.info(f"モード4（体験）開始 サブモード={self._sub_mode}")
 
     def on_mode_exit(self) -> None:
+        # 継続再生中の腕上げ系音を停止しておく
+        self._sound_bank.stop("right_arm_up")
+        self._sound_bank.stop("left_arm_up")
         logger.info("モード4（体験）終了")
 
     def draw(self, frame, results, width: int, height: int) -> None:
@@ -175,10 +184,27 @@ class Mode4Gesture(BaseMode):
     # --- 楽器サブモード ------------------------------------------------------
 
     def _on_instrument_events(self, events: list[str]) -> None:
-        """検出された event をそのまま音再生キーとして扱う。"""
+        """検出された event を音再生キーとして扱う。
+        腕上げ系（right_arm_up / left_arm_up）は上げてる間だけ鳴らしたいので、
+        「上げた瞬間 → play」「下ろした瞬間 → stop」の両エッジで制御する。
+        jump / crouch は 1 発鳴らして自然に減衰させる（短音源想定）。
+        """
+        # 開始側：edge-triggered な event をそのまま再生
         for e in events:
             if self._sound_bank.play(e):
                 logger.info(f"[Mode4/楽器] {e} 発火")
+
+        # 終了側：右腕/左腕は下ろした瞬間に停止（ドラムロール等の長尺音源対策）
+        cur_r = self._detector.right_arm_up
+        cur_l = self._detector.left_arm_up
+        if self._prev_right_arm_up and not cur_r:
+            if self._sound_bank.stop("right_arm_up"):
+                logger.info("[Mode4/楽器] right_arm_up 停止")
+        if self._prev_left_arm_up and not cur_l:
+            if self._sound_bank.stop("left_arm_up"):
+                logger.info("[Mode4/楽器] left_arm_up 停止")
+        self._prev_right_arm_up = cur_r
+        self._prev_left_arm_up = cur_l
 
     # --- 魔法サブモード ------------------------------------------------------
 
@@ -310,6 +336,11 @@ class Mode4Gesture(BaseMode):
 
     def set_sub_mode(self, sub: str) -> None:
         if sub in self.SUB_MODES:
+            # サブモード切替時も継続音を止めておく
+            self._sound_bank.stop("right_arm_up")
+            self._sound_bank.stop("left_arm_up")
+            self._prev_right_arm_up = False
+            self._prev_left_arm_up = False
             self._sub_mode = sub
             self._detector.reset()
             self._magic_state = self._MAGIC_IDLE
