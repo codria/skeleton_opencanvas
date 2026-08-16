@@ -234,8 +234,7 @@ class Mode4Gesture(BaseMode):
         - 構え判定：両手首が「肩から腰の 20% 下ライン」より上（腕が疲れない緩めの閾値）
         - 火球サイズ：両手首の距離に比例（大きく広げると大きな火球）
         - 発射トリガー：charging 中に両手中央を LAUNCH_SPEED 以上のスピードで振ったら発射。
-          そのスイングベクトル × VEL_SCALE を初速に。
-        - キャンセル：スイングなしで構えを解除したら火球を発射せず IDLE に戻す。
+          そのスイングベクトル × VEL_SCALE を初速に。構えを解除しても charging は継続。
         """
         # ---- ランドマークから必要情報を抽出 ----
         LS, RS = 11, 12
@@ -310,11 +309,8 @@ class Mode4Gesture(BaseMode):
                     f"[Mode4/魔法] 発射 size={self._magic_size:.3f} "
                     f"v=({self._magic_vx:+.3f}, {self._magic_vy:+.3f})"
                 )
-            elif not charge_pose:
-                # 振らずに構えだけ解除 → キャンセル（発射音は鳴らさず charging 音だけフェード）
-                self._magic_state = self._MAGIC_IDLE
-                self._sound_bank.fadeout("magic_charge", ms=200)
-                logger.info("[Mode4/魔法] キャンセル（スイングなし）")
+            # ポーズ解除でのキャンセルはしない：構えを下ろしても charging は継続、
+            # 発射トリガーは常にスイング。
 
         elif self._magic_state == self._MAGIC_FLYING:
             self._magic_x += self._magic_vx
