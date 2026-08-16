@@ -12,6 +12,8 @@ mode4_gesture.py
 
 from __future__ import annotations
 import logging
+import math
+import random
 from OpenGL.GL import (
     glClearColor, glClear,
     glMatrixMode, glLoadIdentity, glOrtho, glViewport,
@@ -19,9 +21,9 @@ from OpenGL.GL import (
     glBegin, glEnd, glVertex2f, glBlendFunc, glHint,
     GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
     GL_PROJECTION, GL_MODELVIEW,
-    GL_LINES, GL_POINTS,
+    GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP, GL_POINTS,
     GL_DEPTH_TEST, GL_LIGHTING, GL_BLEND,
-    GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+    GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE,
     GL_LINE_SMOOTH, GL_LINE_SMOOTH_HINT,
     GL_POINT_SMOOTH, GL_POINT_SMOOTH_HINT,
     GL_NICEST,
@@ -73,6 +75,13 @@ class Mode4Gesture(BaseMode):
     _MAGIC_VEL_SCALE: float = 0.7
     _MAGIC_CHARGE_MIN_FRAMES: int = 8
     _MAGIC_FLY_FRAMES: int = 25
+    # エフェクト系
+    _MAGIC_EXPLODE_FRAMES: int = 28              # 爆発表示総フレーム
+    _MAGIC_CHARGE_SPARK_PROB: float = 0.75       # charging 中の spark 生成確率/frame
+    _MAGIC_FLIGHT_SPARK_PROB: float = 1.0        # flying 中の spark 生成確率/frame
+    _MAGIC_FLIGHT_TRAIL_LEN: int = 22            # 軌跡ライン頂点数
+    _MAGIC_EXPLOSION_PARTICLES: int = 48         # 爆発時パーティクル数
+    _MAGIC_SHOCKWAVE_RADIUS: float = 0.28        # 衝撃波リング最大半径（画像座標比）
 
     def __init__(self, config) -> None:
         self._config = config
@@ -95,6 +104,13 @@ class Mode4Gesture(BaseMode):
         # 直近 _MAGIC_HAND_HISTORY フレーム分保持し、発射時に位置差ベクトルを速度化
         self._magic_hand_history: list[tuple[float, float]] = []
 
+        # エフェクト状態
+        # particles: 各要素 = [x, y, vx, vy, life, max_life, size, r, g, b]
+        # x/y/vx/vy/size は画像座標比、life はフレーム
+        self._particles: list[list[float]] = []
+        # 投射中の軌跡ポイント（描画は末尾から古い方へ、alpha fade）
+        self._flight_trail: list[tuple[float, float]] = []
+
         # 楽器モード：腕下ろしで音を止めるための前フレーム状態
         self._prev_right_arm_up: bool = False
         self._prev_left_arm_up: bool = False
@@ -110,6 +126,8 @@ class Mode4Gesture(BaseMode):
         self._detector.reset()
         self._magic_state = self._MAGIC_IDLE
         self._magic_hand_history.clear()
+        self._particles.clear()
+        self._flight_trail.clear()
         self._prev_right_arm_up = False
         self._prev_left_arm_up = False
         logger.info(f"モード4（体験）開始 サブモード={self._sub_mode}")
@@ -297,6 +315,9 @@ class Mode4Gesture(BaseMode):
                         hand_width * self._MAGIC_FIREBALL_SCALE),
                 )
                 self._magic_size += (target - self._magic_size) * self._MAGIC_FIREBALL_LERP
+            # 軌道 spark を確率生成
+            if random.random() < self._MAGIC_CHARGE_SPARK_PROB:
+                self._spawn_charge_spark()
             # 猶予フレームを過ぎたらスイング判定 → 閾値超で発射
             launch_vel = None
             if self._magic_frames >= self._MAGIC_CHARGE_MIN_FRAMES:
@@ -305,6 +326,7 @@ class Mode4Gesture(BaseMode):
                 self._magic_state = self._MAGIC_FLYING
                 self._magic_frames = 0
                 self._magic_vx, self._magic_vy = launch_vel
+                self._flight_trail.clear()
                 logger.info(
                     f"[Mode4/魔法] 発射 size={self._magic_size:.3f} "
                     f"v=({self._magic_vx:+.3f}, {self._magic_vy:+.3f})"
@@ -316,25 +338,50 @@ class Mode4Gesture(BaseMode):
             self._magic_x += self._magic_vx
             self._magic_y += self._magic_vy
             self._magic_frames += 1
+            # 軌跡・尾 spark
+            self._flight_trail.append((self._magic_x, self._magic_y))
+            if len(self._flight_trail) > self._MAGIC_FLIGHT_TRAIL_LEN:
+                self._flight_trail.pop(0)
+            if random.random() < self._MAGIC_FLIGHT_SPARK_PROB:
+                self._spawn_flight_spark()
             if (self._magic_frames > self._MAGIC_FLY_FRAMES or
                     self._magic_y < 0.02 or self._magic_y > 0.98 or
                     self._magic_x < 0.02 or self._magic_x > 0.98):
                 self._magic_state = self._MAGIC_EXPLODE
                 self._magic_frames = 0
+                self._spawn_explosion_burst()
                 self._sound_bank.play("magic_hit")
                 logger.info("[Mode4/魔法] 爆発")
 
         elif self._magic_state == self._MAGIC_EXPLODE:
-            # 拡大しながらフェード（火球サイズ * 3 まで膨らむ）
-            explode_max = max(0.22, self._magic_size * 3.0)
-            self._magic_size = min(explode_max, self._magic_size + 0.012)
             self._magic_frames += 1
-            if self._magic_frames > 22:
+            if self._magic_frames > self._MAGIC_EXPLODE_FRAMES:
                 self._magic_state = self._MAGIC_IDLE
+                self._flight_trail.clear()
 
-        # 描画
-        if self._magic_state != self._MAGIC_IDLE:
-            self._draw_fireball(vx, vy, vw, vh)
+        # パーティクル更新（全状態共通、EXPLODE 完了後も生き残ってれば描く）
+        self._update_particles()
+
+        # ---- 描画 ----
+        # IDLE 中で余韻（particle / trail）もなければセットアップ含めて何もしない
+        if (self._magic_state == self._MAGIC_IDLE and
+                not self._particles and not self._flight_trail):
+            return
+        self._setup_2d(vx, vy, vw, vh)
+        # 尾（FLYING 中と、EXPLODE 直後の余韻）
+        if self._flight_trail:
+            self._draw_flight_trail(vw, vh)
+        # コア（IDLE 以外）
+        if self._magic_state == self._MAGIC_CHARGING:
+            self._draw_fireball_core(vw, vh, pulsing=True)
+            self._draw_charge_rays(vw, vh)
+        elif self._magic_state == self._MAGIC_FLYING:
+            self._draw_fireball_core(vw, vh, pulsing=False)
+        elif self._magic_state == self._MAGIC_EXPLODE:
+            self._draw_explosion_flash(vw, vh)
+            self._draw_shockwave(vw, vh)
+        # パーティクル（最後に上乗せ）
+        self._draw_particles(vw, vh)
 
     def _check_swing_launch(self) -> tuple[float, float] | None:
         """charging 中に毎フレーム呼ぶ。両手中央の LOOKBACK フレーム間位置差の
@@ -354,29 +401,20 @@ class Mode4Gesture(BaseMode):
             return None
         return dx * self._MAGIC_VEL_SCALE, dy * self._MAGIC_VEL_SCALE
 
-    def _draw_fireball(self, vx, vy, vw, vh) -> None:
-        """火玉/爆発を描く。オレンジ色の点で表現（サイズ = 半径）。"""
-        # 状態別のアルファ
-        if self._magic_state == self._MAGIC_EXPLODE:
-            # フェード（1 → 0）
-            alpha = max(0.0, 1.0 - self._magic_frames / 22.0)
-            r, g, b = 1.0, 0.65, 0.15
-        elif self._magic_state == self._MAGIC_CHARGING:
-            alpha = 0.8
-            r, g, b = 1.0, 0.5, 0.1
-        else:  # flying
-            alpha = 0.95
-            r, g, b = 1.0, 0.55, 0.1
+    # --- 描画セットアップ --------------------------------------------------
 
-        # 描画設定
+    def _setup_2d(self, vx, vy, vw, vh) -> None:
+        """魔法エフェクト描画用の 2D 座標系 + 加算合成ブレンドを設定する。
+        Ortho は左上原点（骨格線と同じ）。加算ブレンドで火っぽい光が重なる。
+        """
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)   # 加算：重なりで白飛び感を出す
         glEnable(GL_POINT_SMOOTH)
         glHint(GL_POINT_SMOOTH_HINT, GL_NICEST)
-
-        # viewport を確認
+        glEnable(GL_LINE_SMOOTH)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         glOrtho(0, vw, vh, 0, -1, 1)
@@ -384,24 +422,219 @@ class Mode4Gesture(BaseMode):
         glLoadIdentity()
         glViewport(vx, vy, vw, vh)
 
-        try:
-            # 点サイズは半径 * 短辺 の 2 倍程度
-            short = min(vw, vh)
-            pt_size = max(8.0, self._magic_size * short * 2.0)
-            glPointSize(pt_size)
+    # --- 火球コア（レイヤー glow）-------------------------------------------
+
+    def _draw_fireball_core(self, vw: int, vh: int, pulsing: bool) -> None:
+        """火球本体：5 層の同心 GL_POINTS で「にじむ光球」を作る。
+        pulsing=True なら charging 中のサイズ脈動を掛ける。
+        """
+        short = min(vw, vh)
+        cx = self._magic_x * vw
+        cy = self._magic_y * vh
+        size = self._magic_size
+        if pulsing:
+            size *= 1.0 + math.sin(self._magic_frames * 0.28) * 0.10
+
+        # (半径スケール, α, r, g, b)
+        layers = (
+            (2.6, 0.10, 1.0, 0.35, 0.05),   # 外周 halo（赤めの残光）
+            (1.8, 0.20, 1.0, 0.50, 0.10),
+            (1.2, 0.35, 1.0, 0.65, 0.20),
+            (0.85, 0.60, 1.0, 0.85, 0.45),  # 明るいシェル
+            (0.55, 0.95, 1.0, 1.0, 0.85),   # 白熱コア
+        )
+        for scale, alpha, r, g, b in layers:
+            pt = max(4.0, size * short * 2.0 * scale)
+            glPointSize(pt)
             glColor4f(r, g, b, alpha)
             glBegin(GL_POINTS)
-            glVertex2f(self._magic_x * vw, self._magic_y * vh)
+            glVertex2f(cx, cy)
             glEnd()
-            # 内側にもう一段小さく明るい点（ハイライト）
-            glPointSize(max(4.0, pt_size * 0.5))
-            glColor4f(1.0, 0.95, 0.6, alpha)
+
+    # --- チャージ用エフェクト -----------------------------------------------
+
+    def _draw_charge_rays(self, vw: int, vh: int) -> None:
+        """charging 中：中心から放射する 6 本の光線が徐々に回転。"""
+        short = min(vw, vh)
+        cx = self._magic_x * vw
+        cy = self._magic_y * vh
+        outer = self._magic_size * short * 1.8
+        inner = self._magic_size * short * 0.6
+        rot = self._magic_frames * 0.06
+        glLineWidth(2.0)
+        glColor4f(1.0, 0.7, 0.25, 0.55)
+        glBegin(GL_LINES)
+        for i in range(6):
+            a = rot + math.tau * i / 6
+            glVertex2f(cx + math.cos(a) * inner, cy + math.sin(a) * inner)
+            glVertex2f(cx + math.cos(a) * outer, cy + math.sin(a) * outer)
+        glEnd()
+
+    def _spawn_charge_spark(self) -> None:
+        """外周をぐるっと回りつつ中央に吸い込まれる spark を 1 個生成。"""
+        angle = random.random() * math.tau
+        r_init = self._magic_size * (1.4 + random.random() * 0.6)
+        # 接線方向 + 中心向き成分
+        tangent = 0.006
+        inward = 0.010
+        vx = -math.sin(angle) * tangent - math.cos(angle) * inward
+        vy = math.cos(angle) * tangent - math.sin(angle) * inward
+        # やや彩度違いの暖色
+        r = 1.0
+        g = 0.55 + random.random() * 0.25
+        b = 0.10 + random.random() * 0.15
+        self._particles.append([
+            self._magic_x + math.cos(angle) * r_init,
+            self._magic_y + math.sin(angle) * r_init,
+            vx, vy,
+            20.0, 20.0, 0.010,
+            r, g, b,
+        ])
+
+    # --- 飛翔中エフェクト ---------------------------------------------------
+
+    def _draw_flight_trail(self, vw: int, vh: int) -> None:
+        """飛翔軌跡：直近位置を alpha フェードするラインで結ぶ。
+        末端（＝古い側）ほど暗く細くする効果は太い線 + 加算 blend で見せる。
+        """
+        n = len(self._flight_trail)
+        if n < 2:
+            return
+        glLineWidth(6.0)
+        glBegin(GL_LINE_STRIP)
+        for i, (x, y) in enumerate(self._flight_trail):
+            t = i / max(1, n - 1)   # 0 = 古い, 1 = 最新
+            alpha = t * 0.7
+            glColor4f(1.0, 0.55 + t * 0.15, 0.15, alpha)
+            glVertex2f(x * vw, y * vh)
+        glEnd()
+
+    def _spawn_flight_spark(self) -> None:
+        """飛翔中に尾を引く spark を生成。速度は本体と逆向きに小さくブレ。"""
+        jitter = 0.006
+        speed_back = -0.30
+        vx = self._magic_vx * speed_back + (random.random() - 0.5) * jitter
+        vy = self._magic_vy * speed_back + (random.random() - 0.5) * jitter
+        self._particles.append([
+            self._magic_x + (random.random() - 0.5) * 0.008,
+            self._magic_y + (random.random() - 0.5) * 0.008,
+            vx, vy,
+            14.0, 14.0, 0.012,
+            1.0, 0.55 + random.random() * 0.25, 0.12,
+        ])
+
+    # --- 爆発エフェクト -----------------------------------------------------
+
+    def _spawn_explosion_burst(self) -> None:
+        """爆発フレーム 0：放射状にパーティクルを撒く。"""
+        n = self._MAGIC_EXPLOSION_PARTICLES
+        for i in range(n):
+            a = math.tau * i / n + (random.random() - 0.5) * 0.15
+            speed = 0.020 + random.random() * 0.025
+            # 3 割は白系（＝白熱コア風）、残りは橙〜赤
+            if random.random() < 0.30:
+                r, g, b = 1.0, 0.95, 0.75
+            else:
+                r, g, b = 1.0, 0.40 + random.random() * 0.30, 0.10
+            self._particles.append([
+                self._magic_x, self._magic_y,
+                math.cos(a) * speed, math.sin(a) * speed,
+                22.0 + random.random() * 6.0, 26.0, 0.016,
+                r, g, b,
+            ])
+
+    def _draw_shockwave(self, vw: int, vh: int) -> None:
+        """爆発中：時間で拡大する光の輪。α は 1→0 でフェード。"""
+        short = min(vw, vh)
+        t = self._magic_frames / self._MAGIC_EXPLODE_FRAMES
+        if t > 1.0:
+            return
+        radius = self._MAGIC_SHOCKWAVE_RADIUS * t
+        alpha = max(0.0, 1.0 - t) * 0.7
+        cx = self._magic_x * vw
+        cy = self._magic_y * vh
+        segments = 48
+        # 外リング
+        glLineWidth(4.0)
+        glColor4f(1.0, 0.85, 0.4, alpha)
+        glBegin(GL_LINE_LOOP)
+        for i in range(segments):
+            a = math.tau * i / segments
+            glVertex2f(cx + math.cos(a) * radius * short,
+                       cy + math.sin(a) * radius * short)
+        glEnd()
+        # 内側にもう一輪（少し遅れて広がる感じを出すために t を後ろにずらす）
+        t2 = max(0.0, (self._magic_frames - 4) / self._MAGIC_EXPLODE_FRAMES)
+        if t2 > 0.0 and t2 < 1.0:
+            radius2 = self._MAGIC_SHOCKWAVE_RADIUS * 0.7 * t2
+            alpha2 = max(0.0, 1.0 - t2) * 0.5
+            glLineWidth(2.0)
+            glColor4f(1.0, 0.95, 0.6, alpha2)
+            glBegin(GL_LINE_LOOP)
+            for i in range(segments):
+                a = math.tau * i / segments
+                glVertex2f(cx + math.cos(a) * radius2 * short,
+                           cy + math.sin(a) * radius2 * short)
+            glEnd()
+
+    def _draw_explosion_flash(self, vw: int, vh: int) -> None:
+        """爆発中央の白熱フラッシュ。最初の数フレームで一気に出て急速フェード。"""
+        short = min(vw, vh)
+        # 序盤ほど明るい：0 で最大、6 フレームで消える
+        f = self._magic_frames
+        flash_life = 8.0
+        if f > flash_life:
+            return
+        t = f / flash_life
+        alpha = (1.0 - t) ** 2
+        # フラッシュはコアより大きい
+        pt_outer = max(20.0, self._magic_size * short * 4.5 * (1.0 + t * 1.5))
+        pt_inner = pt_outer * 0.55
+        cx = self._magic_x * vw
+        cy = self._magic_y * vh
+        glPointSize(pt_outer)
+        glColor4f(1.0, 0.7, 0.3, alpha * 0.7)
+        glBegin(GL_POINTS)
+        glVertex2f(cx, cy)
+        glEnd()
+        glPointSize(pt_inner)
+        glColor4f(1.0, 0.98, 0.85, alpha)
+        glBegin(GL_POINTS)
+        glVertex2f(cx, cy)
+        glEnd()
+
+    # --- パーティクル -------------------------------------------------------
+
+    def _update_particles(self) -> None:
+        """全パーティクルを 1 フレーム進める。寿命切れは削除。"""
+        if not self._particles:
+            return
+        survivors: list[list[float]] = []
+        for p in self._particles:
+            p[0] += p[2]
+            p[1] += p[3]
+            # ちょい重力・空気抵抗（飛翔粒子っぽくする）
+            p[3] += 0.0006
+            p[2] *= 0.965
+            p[3] *= 0.965
+            p[4] -= 1.0
+            if p[4] > 0.0:
+                survivors.append(p)
+        self._particles = survivors
+
+    def _draw_particles(self, vw: int, vh: int) -> None:
+        """全パーティクル描画。1 個ずつ glPointSize/glColor を切替（数十個なら OK）。"""
+        if not self._particles:
+            return
+        short = min(vw, vh)
+        for p in self._particles:
+            alpha = max(0.0, p[4] / p[5])
+            pt = max(2.0, p[6] * short)
+            glPointSize(pt)
+            glColor4f(p[7], p[8], p[9], alpha)
             glBegin(GL_POINTS)
-            glVertex2f(self._magic_x * vw, self._magic_y * vh)
+            glVertex2f(p[0] * vw, p[1] * vh)
             glEnd()
-        finally:
-            glDisable(GL_POINT_SMOOTH)
-            glDisable(GL_BLEND)
 
     # --- サブモード切替 ------------------------------------------------------
 
@@ -423,6 +656,8 @@ class Mode4Gesture(BaseMode):
             self._detector.reset()
             self._magic_state = self._MAGIC_IDLE
             self._magic_hand_history.clear()
+            self._particles.clear()
+            self._flight_trail.clear()
             logger.info(f"Mode4 サブモード: {sub}")
 
     def toggle_sub_mode(self) -> str:
