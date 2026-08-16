@@ -1,12 +1,13 @@
 """
 mode4_gesture.py
 モード4：ジェスチャー体験モード。
-シンプルな骨格線オーバーレイ（「AI が体を認識できてる」ことを直感的に見せる）＋
-サブモード切替（楽器演奏 / 魔法エフェクト etc.）で「遊び」を提供する。
+背景にカメラ映像（Mode1 同等）、その上に骨格線オーバーレイ、
+サブモード（楽器 / 魔法）でジェスチャー連動の効果音・エフェクトを出す。
 
-Phase 1（現状）: 骨組みのみ。骨格線描画とサブモード切替インフラだけ実装。
-Phase 2: 楽器サブモード（QSoundEffect で wav 再生）
-Phase 3: 魔法サブモード（OpenGL パーティクル）
+サブモード:
+    instrument : 右腕/左腕/ジャンプ/しゃがみで別々の音を鳴らす
+    magic      : 両腕を肩以上に上げると火玉 charging、
+                 両腕を下ろすと火玉が発射→着弾で爆発
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import logging
 from OpenGL.GL import (
     glClearColor, glClear,
     glMatrixMode, glLoadIdentity, glOrtho, glViewport,
-    glEnable, glDisable, glColor3f, glLineWidth, glPointSize,
+    glEnable, glDisable, glColor3f, glColor4f, glLineWidth, glPointSize,
     glBegin, glEnd, glVertex2f, glBlendFunc, glHint,
     GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
     GL_PROJECTION, GL_MODELVIEW,
@@ -28,14 +29,16 @@ from OpenGL.GL import (
 
 from app.modes.base_mode import BaseMode
 from app.pose_constants import POSE_CONNECTIONS
+from app.camera_overlay import CameraOverlay
+from app.sound_bank import SoundBank
+from app.gesture_detector import GestureDetector
 
 logger = logging.getLogger(__name__)
 
 
 class Mode4Gesture(BaseMode):
-    """ジェスチャー体験モード。骨格線オーバーレイ + サブモードで遊びを追加。"""
+    """ジェスチャー体験モード。"""
 
-    # サブモード（S キーで循環）
     SUB_MODES: tuple[str, ...] = ("instrument", "magic")
     SUB_MODE_LABELS: dict[str, str] = {
         "instrument": "楽器",
@@ -43,25 +46,54 @@ class Mode4Gesture(BaseMode):
     }
     MIN_VIS = 0.4
 
+    # 魔法モードの内部状態
+    _MAGIC_IDLE = "idle"
+    _MAGIC_CHARGING = "charging"
+    _MAGIC_FLYING = "flying"
+    _MAGIC_EXPLODE = "explode"
+
     def __init__(self, config) -> None:
         self._config = config
         self._sub_mode: str = "instrument"
 
+        # 描画・音・ジェスチャー検出器
+        self._camera_overlay = CameraOverlay()
+        self._sound_bank = SoundBank("assets/sounds")
+        self._detector = GestureDetector()
+
+        # 魔法モード状態
+        self._magic_state = self._MAGIC_IDLE
+        self._magic_x: float = 0.5    # 画像座標 0-1
+        self._magic_y: float = 0.5
+        self._magic_vx: float = 0.0   # 単位: 画像座標/フレーム
+        self._magic_vy: float = 0.0
+        self._magic_size: float = 0.02   # 半径（画像座標比）
+        self._magic_frames: int = 0
+        # 発射時の飛翔方向計算のため、charging 中の手位置履歴
+        self._charge_hand_x: float | None = None
+        self._charge_hand_y: float | None = None
+
     # --- BaseMode 実装 -------------------------------------------------------
 
     def initialize(self) -> None:
-        # OpenGL リソースの初期化。Phase 1 では特になし。
-        pass
+        self._camera_overlay.initialize()
+        logger.info("Mode4Gesture 初期化完了")
+
+    def on_mode_enter(self) -> None:
+        # 状態リセット（前回の魔法状態などを持ち越さない）
+        self._detector.reset()
+        self._magic_state = self._MAGIC_IDLE
+        logger.info(f"モード4（体験）開始 サブモード={self._sub_mode}")
+
+    def on_mode_exit(self) -> None:
+        logger.info("モード4（体験）終了")
 
     def draw(self, frame, results, width: int, height: int) -> None:
-        # 背景は暗めで統一（暗いほうがジェスチャーの動きが見やすい）
-        glClearColor(0.05, 0.05, 0.08, 1.0)
+        # 背景は黒でクリア
+        glClearColor(0.0, 0.0, 0.0, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        if not results:
-            return
-
-        # --- カメラアスペクトに合わせたビューポート ---
+        # カメラアスペクトに合わせたビューポート
         if frame is not None:
             cam_aspect = frame.shape[1] / frame.shape[0]
         else:
@@ -78,20 +110,26 @@ class Mode4Gesture(BaseMode):
             view_x = 0
             view_y = (height - view_h) // 2
 
+        # 背景：カメラ映像を不透明で描く（Mode1 と同じ見た目）
+        if frame is not None:
+            self._camera_overlay.draw(frame, 1.0, view_x, view_y, view_w, view_h)
+
+        # 骨格線 + サブモード処理
         self._draw_skeleton(results, view_x, view_y, view_w, view_h)
 
-        # サブモード固有の描画（Phase 2/3 で拡張）。今は no-op。
+        # ジェスチャー検出（両サブモード共通で状態更新）
+        events = self._detector.detect(results)
+
         if self._sub_mode == "instrument":
-            self._draw_instrument_overlay(results, view_x, view_y, view_w, view_h)
+            self._on_instrument_events(events)
         elif self._sub_mode == "magic":
-            self._draw_magic_overlay(results, view_x, view_y, view_w, view_h)
+            self._update_and_draw_magic(results, view_x, view_y, view_w, view_h)
 
     # --- 骨格線オーバーレイ --------------------------------------------------
 
     def _draw_skeleton(self, results, vx: int, vy: int, vw: int, vh: int) -> None:
-        """gl_widget.draw_bone_overlay と同等の骨格線描画。
-        黄色線＋シアン点、アンチエイリアス付き。
-        """
+        if not results:
+            return
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
@@ -111,7 +149,6 @@ class Mode4Gesture(BaseMode):
         try:
             for result in results:
                 lms = result.landmarks
-
                 # ボーン線（黄色）
                 glColor3f(1.0, 1.0, 0.0)
                 glLineWidth(3.0)
@@ -122,7 +159,6 @@ class Mode4Gesture(BaseMode):
                         glVertex2f(lms[a].x * vw, lms[a].y * vh)
                         glVertex2f(lms[b].x * vw, lms[b].y * vh)
                 glEnd()
-
                 # 関節点（シアン）
                 glColor3f(0.0, 1.0, 1.0)
                 glPointSize(10.0)
@@ -136,15 +172,131 @@ class Mode4Gesture(BaseMode):
             glDisable(GL_POINT_SMOOTH)
             glDisable(GL_BLEND)
 
-    # --- サブモード固有描画（Phase 2/3 で実装）-------------------------------
+    # --- 楽器サブモード ------------------------------------------------------
 
-    def _draw_instrument_overlay(self, results, vx, vy, vw, vh) -> None:
-        """楽器モード：ヒットゾーンや状態表示など。Phase 2 で実装。"""
-        pass
+    def _on_instrument_events(self, events: list[str]) -> None:
+        """検出された event をそのまま音再生キーとして扱う。"""
+        for e in events:
+            if self._sound_bank.play(e):
+                logger.info(f"[Mode4/楽器] {e} 発火")
 
-    def _draw_magic_overlay(self, results, vx, vy, vw, vh) -> None:
-        """魔法モード：パーティクルエフェクトなど。Phase 3 で実装。"""
-        pass
+    # --- 魔法サブモード ------------------------------------------------------
+
+    def _update_and_draw_magic(self, results, vx, vy, vw, vh) -> None:
+        """魔法の状態機械更新 + 火玉描画。"""
+        # 状態機械の更新
+        both_up = self._detector.both_arms_up
+
+        # 両手中央位置を取得（画像座標）
+        hand_x = hand_y = None
+        if results:
+            lms = results[0].landmarks
+            _LW, _RW = 15, 16
+            if lms[_LW].visibility >= 0.5 and lms[_RW].visibility >= 0.5:
+                hand_x = (lms[_LW].x + lms[_RW].x) / 2
+                hand_y = (lms[_LW].y + lms[_RW].y) / 2
+
+        if self._magic_state == self._MAGIC_IDLE:
+            # 両腕上げが確立したら charging へ
+            if both_up and hand_x is not None:
+                self._magic_state = self._MAGIC_CHARGING
+                self._magic_x = hand_x
+                self._magic_y = hand_y
+                self._magic_size = 0.02
+                self._charge_hand_x = hand_x
+                self._charge_hand_y = hand_y
+                self._sound_bank.play("magic_charge")
+                logger.info("[Mode4/魔法] charging 開始")
+
+        elif self._magic_state == self._MAGIC_CHARGING:
+            if hand_x is not None:
+                self._magic_x = hand_x
+                self._magic_y = hand_y
+                self._charge_hand_x = hand_x
+                self._charge_hand_y = hand_y
+            # 火玉は徐々に大きく（最大 0.06）
+            self._magic_size = min(0.06, self._magic_size + 0.0015)
+            if not both_up:
+                # 両腕降ろした → 発射
+                self._magic_state = self._MAGIC_FLYING
+                self._magic_frames = 0
+                # 発射方向：シンプルに上方向、少し前フレーム手位置とのズレを加味
+                self._magic_vx = 0.0
+                self._magic_vy = -0.025    # 上に飛ぶ
+                logger.info("[Mode4/魔法] 発射")
+
+        elif self._magic_state == self._MAGIC_FLYING:
+            self._magic_x += self._magic_vx
+            self._magic_y += self._magic_vy
+            self._magic_frames += 1
+            # 画面外に出るか、一定フレーム経過で爆発
+            if (self._magic_frames > 25 or
+                    self._magic_y < 0.02 or self._magic_y > 0.98 or
+                    self._magic_x < 0.02 or self._magic_x > 0.98):
+                self._magic_state = self._MAGIC_EXPLODE
+                self._magic_frames = 0
+                self._sound_bank.play("magic_hit")
+                logger.info("[Mode4/魔法] 爆発")
+
+        elif self._magic_state == self._MAGIC_EXPLODE:
+            # 徐々に拡大しながらフェード
+            self._magic_size = min(0.22, self._magic_size + 0.012)
+            self._magic_frames += 1
+            if self._magic_frames > 22:
+                self._magic_state = self._MAGIC_IDLE
+
+        # 描画
+        if self._magic_state != self._MAGIC_IDLE:
+            self._draw_fireball(vx, vy, vw, vh)
+
+    def _draw_fireball(self, vx, vy, vw, vh) -> None:
+        """火玉/爆発を描く。オレンジ色の点で表現（サイズ = 半径）。"""
+        # 状態別のアルファ
+        if self._magic_state == self._MAGIC_EXPLODE:
+            # フェード（1 → 0）
+            alpha = max(0.0, 1.0 - self._magic_frames / 22.0)
+            r, g, b = 1.0, 0.65, 0.15
+        elif self._magic_state == self._MAGIC_CHARGING:
+            alpha = 0.8
+            r, g, b = 1.0, 0.5, 0.1
+        else:  # flying
+            alpha = 0.95
+            r, g, b = 1.0, 0.55, 0.1
+
+        # 描画設定
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_POINT_SMOOTH)
+        glHint(GL_POINT_SMOOTH_HINT, GL_NICEST)
+
+        # viewport を確認
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, vw, vh, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glViewport(vx, vy, vw, vh)
+
+        try:
+            # 点サイズは半径 * 短辺 の 2 倍程度
+            short = min(vw, vh)
+            pt_size = max(8.0, self._magic_size * short * 2.0)
+            glPointSize(pt_size)
+            glColor4f(r, g, b, alpha)
+            glBegin(GL_POINTS)
+            glVertex2f(self._magic_x * vw, self._magic_y * vh)
+            glEnd()
+            # 内側にもう一段小さく明るい点（ハイライト）
+            glPointSize(max(4.0, pt_size * 0.5))
+            glColor4f(1.0, 0.95, 0.6, alpha)
+            glBegin(GL_POINTS)
+            glVertex2f(self._magic_x * vw, self._magic_y * vh)
+            glEnd()
+        finally:
+            glDisable(GL_POINT_SMOOTH)
+            glDisable(GL_BLEND)
 
     # --- サブモード切替 ------------------------------------------------------
 
@@ -159,14 +311,15 @@ class Mode4Gesture(BaseMode):
     def set_sub_mode(self, sub: str) -> None:
         if sub in self.SUB_MODES:
             self._sub_mode = sub
+            self._detector.reset()
+            self._magic_state = self._MAGIC_IDLE
             logger.info(f"Mode4 サブモード: {sub}")
 
     def toggle_sub_mode(self) -> str:
-        """S キーで循環切替。次のサブモード名を返す。"""
         try:
             idx = self.SUB_MODES.index(self._sub_mode)
         except ValueError:
             idx = -1
-        self._sub_mode = self.SUB_MODES[(idx + 1) % len(self.SUB_MODES)]
-        logger.info(f"Mode4 サブモード切替: {self._sub_mode}")
-        return self._sub_mode
+        new_sub = self.SUB_MODES[(idx + 1) % len(self.SUB_MODES)]
+        self.set_sub_mode(new_sub)
+        return new_sub
