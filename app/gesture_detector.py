@@ -10,7 +10,9 @@ Mode4（体験モード）用のジェスチャー検出。
     right_arm_up   : 右手首が右肩より上がった瞬間
     left_arm_up    : 左手首が左肩より上がった瞬間
     jump           : 腰 Y が急に上に動いた（一定閾値以上の Δ）
-    crouch         : 腰と足首、腰と肩の縦距離がどちらも小さい状態になった瞬間
+    land           : jump 後、腰 Y が急に下に動いた（着地の瞬間）
+    crouch         : 静止しゃがみ姿勢（腰と足首・腰と肩の縦距離が両方小さい）
+                     ※ 空中（jump 後 land 前）と、着地直後 N フレームは抑制
 
 状態プロパティ（魔法モード側で参照）:
     right_arm_up   : 右手首が右肩より上に居るか（現在フレーム）
@@ -44,6 +46,10 @@ class GestureConfig:
     arm_up_off: float = 0.0
     # ジャンプ：腰 Y の負方向（上向き）Δ が 3% 超えた瞬間
     jump_delta_threshold: float = 0.03
+    # 着地：jump 中に腰 Y の正方向（下向き）Δ が 3% 超えた瞬間
+    land_delta_threshold: float = 0.03
+    # 着地後、しゃがみ判定を抑制するフレーム数（着地→しゃがみ姿勢の二重発火防止）
+    land_grace_frames: int = 15
     # しゃがみ：腰-足首 と 腰-肩 の縦距離が両方これ未満
     crouch_hip_ankle: float = 0.28
     crouch_shoulder_hip: float = 0.20
@@ -58,6 +64,10 @@ class _State:
     crouching: bool = False
     prev_hip_y: Optional[float] = None
     cooldowns: dict = field(default_factory=dict)
+    # 案A: 空中フラグ。jump 発火 → True、land 発火 → False。
+    # crouch は空中/着地直後（land_grace > 0）は発火抑制する。
+    airborne: bool = False
+    land_grace: int = 0
 
 
 class GestureDetector:
@@ -97,6 +107,9 @@ class GestureDetector:
             st.cooldowns[k] -= 1
             if st.cooldowns[k] <= 0:
                 del st.cooldowns[k]
+        # 着地後の crouch 抑制猶予も進行
+        if st.land_grace > 0:
+            st.land_grace -= 1
 
         if not results:
             st.prev_hip_y = None
@@ -129,18 +142,26 @@ class GestureDetector:
         if lms[_LH].visibility >= vis and lms[_RH].visibility >= vis:
             hip_y = (lms[_LH].y + lms[_RH].y) / 2
 
-        # ジャンプ：Δ hip_y が負方向（上向き）で閾値超え
+        # ジャンプ / 着地：腰 Y の Δ で対称判定
         if hip_y is not None and st.prev_hip_y is not None:
             delta_up = st.prev_hip_y - hip_y   # Y 減少 = 上に動いた
             if delta_up > cfg.jump_delta_threshold:
-                self._fire(events, "jump")
+                if self._fire(events, "jump"):
+                    st.airborne = True
+            elif st.airborne and (-delta_up) > cfg.land_delta_threshold:
+                # 空中→急降下＝着地
+                if self._fire(events, "land"):
+                    st.airborne = False
+                    st.land_grace = cfg.land_grace_frames
         st.prev_hip_y = hip_y
 
         # しゃがみ：肩・腰・足首の縦距離が両方小さいか
+        # 空中／着地直後は crouch 判定を抑制（二重発火防止）
         crouch_now = False
-        if hip_y is not None and \
-                lms[_LA].visibility >= vis and lms[_RA].visibility >= vis and \
-                lms[_LS].visibility >= vis and lms[_RS].visibility >= vis:
+        if (not st.airborne and st.land_grace == 0 and
+                hip_y is not None and
+                lms[_LA].visibility >= vis and lms[_RA].visibility >= vis and
+                lms[_LS].visibility >= vis and lms[_RS].visibility >= vis):
             ankle_y = (lms[_LA].y + lms[_RA].y) / 2
             shoulder_y = (lms[_LS].y + lms[_RS].y) / 2
             dist_hip_ankle = abs(ankle_y - hip_y)
@@ -155,9 +176,12 @@ class GestureDetector:
 
         return events
 
-    def _fire(self, events: list[str], key: str) -> None:
-        """クールダウン中でなければ発火して登録＋クールダウン開始。"""
+    def _fire(self, events: list[str], key: str) -> bool:
+        """クールダウン中でなければ発火して登録＋クールダウン開始。
+        戻り値: 実際に発火したら True（呼び出し側で airborne 等の状態を更新する）。
+        """
         if key in self._st.cooldowns:
-            return
+            return False
         events.append(key)
         self._st.cooldowns[key] = self._cfg.cooldown_frames
+        return True

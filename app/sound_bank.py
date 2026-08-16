@@ -23,8 +23,9 @@ SOUND_MAP: dict[str, str] = {
     # 楽器モード
     "right_arm_up": "ティンパニロール",
     "left_arm_up":  "ロールの閉め",
-    "jump":         "構えを取る",
-    "crouch":       "ジャンプの着地",
+    "jump":         "可愛い動作",      # 腰 Y の急上昇（跳んだ瞬間）
+    "land":         "食べ物をパクッ",  # 腰 Y の急降下（着地の瞬間）
+    "crouch":       "しょげる",        # 静止しゃがみ姿勢
     # 魔法モード
     "magic_charge": "火炎魔法1",
     "magic_hit":    "爆発1",
