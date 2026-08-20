@@ -107,9 +107,10 @@ class Mode4Gesture(BaseMode):
     _ICE_SPREAD: float = 0.5                     # 噴射の広がり半角（rad）
     _ICE_LIFE: float = 16.0                      # 氷粒子の寿命（frame）
     _ICE_END_TOLERANCE: int = 4                  # 右腕を下ろして何フレームで終了とみなすか
-    # 雷（左腕のみ・一発）
-    _THUNDER_FRAMES: int = 22                    # 表示総フレーム
-    _THUNDER_FLASH_FRAMES: int = 10              # 全画面フラッシュの減衰フレーム
+    # 雷（左腕のみ・一発）。溜め（構え音＋帯電）→ 着弾（フラッシュ＋稲妻）の 2 段。
+    _THUNDER_CHARGE_FRAMES: int = 10             # 着弾前の溜めフレーム（構え音の尺に合わせる）
+    _THUNDER_FRAMES: int = 22                    # 着弾後の表示総フレーム
+    _THUNDER_FLASH_FRAMES: int = 10              # 全画面フラッシュの減衰フレーム（着弾起点）
     _THUNDER_BOLT_FLICKER: int = 12             # 稲妻を再生成してちらつかせる期間
     _THUNDER_SEGMENTS: int = 16                  # 稲妻のジグザグ分割数
     _THUNDER_JITTER: float = 0.05                # 稲妻の横ブレ幅（画像座標比）
@@ -194,9 +195,9 @@ class Mode4Gesture(BaseMode):
         # 継続再生中の右腕ドラムロール音は短くフェードして止める
         # （左腕シンバルは短音なので放置で自然に減衰）
         self._sound_bank.fadeout("right_arm_up", ms=150)
-        # 魔法の継続音（火チャージ・吹雪）も念のためフェード
-        self._sound_bank.fadeout("magic_charge", ms=150)
-        self._sound_bank.fadeout("magic_ice", ms=150)
+        # 魔法の継続音（火チャージ・氷構え）も念のためフェード
+        self._sound_bank.fadeout("magic_fire_charge", ms=150)
+        self._sound_bank.fadeout("magic_ice_charge", ms=150)
         logger.info("モード4（体験）終了")
 
     def draw(self, frame, results, width: int, height: int) -> None:
@@ -456,7 +457,7 @@ class Mode4Gesture(BaseMode):
         # 腕を上げてきた履歴は捨て、charging 中の動きだけをスイング判定対象に
         self._magic_hand_history.clear()
         self._magic_hand_history.append((cx, cy))
-        self._sound_bank.play("magic_charge")
+        self._sound_bank.play("magic_fire_charge")
         logger.info("[Mode4/魔法] 火：charging 開始")
 
     def _update_fire(self, info) -> None:
@@ -494,7 +495,7 @@ class Mode4Gesture(BaseMode):
                 )
             elif self._fire_abandon > self._FIRE_ABANDON_FRAMES:
                 # 振らずに腕を下ろしたまま → 不発にして cooldown へ
-                self._sound_bank.fadeout("magic_charge", ms=200)
+                self._sound_bank.fadeout("magic_fire_charge", ms=200)
                 self._magic_state = self._MAGIC_IDLE
                 self._magic_phase = self._PH_COOLDOWN
                 logger.info("[Mode4/魔法] 火：不発（スイングなし）")
@@ -514,7 +515,7 @@ class Mode4Gesture(BaseMode):
                 self._magic_state = self._MAGIC_EXPLODE
                 self._magic_frames = 0
                 self._spawn_explosion_burst()
-                self._sound_bank.play("magic_hit")
+                self._sound_bank.play("magic_fire_hit")
                 logger.info("[Mode4/魔法] 火：爆発")
 
         elif self._magic_state == self._MAGIC_EXPLODE:
@@ -532,7 +533,7 @@ class Mode4Gesture(BaseMode):
         self._ice_lost = 0
         if info["rc"] is not None:
             self._ice_hand = info["rc"]
-        self._sound_bank.play("magic_ice")
+        self._sound_bank.play("magic_ice_charge")
         logger.info("[Mode4/魔法] 吹雪：開始")
 
     def _update_ice(self, info) -> None:
@@ -547,8 +548,12 @@ class Mode4Gesture(BaseMode):
         else:
             self._ice_lost += 1
             if self._ice_lost > self._ICE_END_TOLERANCE:
+                # 終了＝「凍結」：着弾音＋手元に氷の弾ける粒を撒いて締める
+                self._sound_bank.fadeout("magic_ice_charge", ms=120)
+                self._sound_bank.play("magic_ice_hit")
+                self._spawn_ice_freeze_burst(*self._ice_hand)
                 self._magic_phase = self._PH_COOLDOWN
-                logger.info("[Mode4/魔法] 吹雪：終了")
+                logger.info("[Mode4/魔法] 吹雪：凍結（終了）")
 
     # --- 雷（左腕のみ・一発）------------------------------------------------
 
@@ -557,29 +562,45 @@ class Mode4Gesture(BaseMode):
         self._thunder_frames = 0
         tx, ty = info["lc"] if info["lc"] is not None else (0.5, 0.3)
         self._thunder_x, self._thunder_y = tx, ty
-        self._gen_thunder_bolt()
-        # 着弾点にデブリ火花
-        for i in range(16):
-            a = math.tau * i / 16 + (random.random() - 0.5) * 0.3
-            spd = 0.010 + random.random() * 0.020
-            self._particles.append([
-                tx, ty,
-                math.cos(a) * spd, math.sin(a) * spd,
-                16.0 + random.random() * 6.0, 22.0, 0.010,
-                0.7, 0.85, 1.0,
-            ])
-        self._sound_bank.play("magic_thunder")
-        logger.info("[Mode4/魔法] 雷：着弾")
+        self._thunder_bolt.clear()   # 溜め中は稲妻なし、着弾時に生成
+        self._sound_bank.play("magic_thunder_charge")
+        logger.info("[Mode4/魔法] 雷：溜め開始")
 
     def _update_thunder(self, info) -> None:
         self._thunder_frames += 1
-        # ちらつき：前半だけ稲妻を再生成
-        if (self._thunder_frames <= self._THUNDER_BOLT_FLICKER and
-                self._thunder_frames % 2 == 0):
+        cf = self._THUNDER_CHARGE_FRAMES
+        # 追尾：溜め中は左手位置に着弾点を追従させる（下ろしても最後の位置で撃つ）
+        if (self._thunder_frames <= cf and info is not None and
+                info["lc"] is not None):
+            self._thunder_x, self._thunder_y = info["lc"]
+
+        if self._thunder_frames < cf:
+            # 溜め：手元に帯電スパークを集める
+            if random.random() < 0.9:
+                self._spawn_gather_spark(self._thunder_x, self._thunder_y)
+        elif self._thunder_frames == cf:
+            # 着弾：稲妻生成＋全画面フラッシュ（描画側）＋着弾音＋デブリ
             self._gen_thunder_bolt()
-        if self._thunder_frames > self._THUNDER_FRAMES:
-            self._magic_phase = self._PH_COOLDOWN
-            self._thunder_bolt.clear()
+            self._sound_bank.play("magic_thunder_hit")
+            tx, ty = self._thunder_x, self._thunder_y
+            for i in range(16):
+                a = math.tau * i / 16 + (random.random() - 0.5) * 0.3
+                spd = 0.010 + random.random() * 0.020
+                self._particles.append([
+                    tx, ty,
+                    math.cos(a) * spd, math.sin(a) * spd,
+                    16.0 + random.random() * 6.0, 22.0, 0.010,
+                    0.7, 0.85, 1.0,
+                ])
+            logger.info("[Mode4/魔法] 雷：着弾")
+        else:
+            # 着弾後：稲妻をちらつかせる
+            strike_f = self._thunder_frames - cf
+            if strike_f <= self._THUNDER_BOLT_FLICKER and strike_f % 2 == 0:
+                self._gen_thunder_bolt()
+            if strike_f > self._THUNDER_FRAMES:
+                self._magic_phase = self._PH_COOLDOWN
+                self._thunder_bolt.clear()
 
     def _gen_thunder_bolt(self) -> None:
         """画面上端から着弾点まで、横ブレしながら落ちるジグザグ折れ線を生成。
@@ -855,6 +876,19 @@ class Mode4Gesture(BaseMode):
                 0.65 + random.random() * 0.15, g, 1.0,
             ])
 
+    def _spawn_ice_freeze_burst(self, hx: float, hy: float) -> None:
+        """吹雪終了（凍結）時に手元で弾ける氷粒。放射状に軽く撒いて締める。"""
+        for i in range(20):
+            a = math.tau * i / 20 + (random.random() - 0.5) * 0.25
+            spd = 0.008 + random.random() * 0.016
+            g = 0.88 + random.random() * 0.12
+            self._particles.append([
+                hx, hy,
+                math.cos(a) * spd, math.sin(a) * spd,
+                18.0 + random.random() * 6.0, 24.0, 0.008,
+                0.7, g, 1.0,
+            ])
+
     def _draw_ice_core(self, vw: int, vh: int) -> None:
         """右手先の寒色グロー（噴射口）。3 層の淡いシアン。"""
         short = min(vw, vh)
@@ -875,12 +909,32 @@ class Mode4Gesture(BaseMode):
     # --- 雷エフェクト -------------------------------------------------------
 
     def _draw_thunder(self, vw: int, vh: int) -> None:
-        """全画面フラッシュ＋稲妻。加算合成なので白系がそのまま強く光る。"""
+        """雷の描画。溜め中（strike_f<0）は手元に帯電グロー、
+        着弾後（strike_f>=0）は全画面フラッシュ＋稲妻。加算合成で白系が強く光る。"""
         short = min(vw, vh)
-        f = self._thunder_frames
-        # 全画面フラッシュ（減衰）＋稲妻再生成タイミングで軽く増幅
-        fa = max(0.0, 1.0 - f / self._THUNDER_FLASH_FRAMES)
-        flick = 0.15 if (f <= self._THUNDER_BOLT_FLICKER and f % 2 == 0) else 0.0
+        strike_f = self._thunder_frames - self._THUNDER_CHARGE_FRAMES
+        cx = self._thunder_x * vw
+        cy = self._thunder_y * vh
+
+        if strike_f < 0:
+            # 溜め：着弾に向けて手元の帯電球が育つ（青白）
+            t = (self._thunder_frames + 1) / max(1, self._THUNDER_CHARGE_FRAMES)
+            for scale, alpha, r, g, b in (
+                (0.10, 0.10 * t, 0.5, 0.7, 1.0),
+                (0.06, 0.25 * t, 0.7, 0.85, 1.0),
+                (0.03, 0.60 * t, 0.9, 0.97, 1.0),
+            ):
+                glPointSize(max(4.0, scale * short * 2.0))
+                glColor4f(r, g, b, alpha)
+                glBegin(GL_POINTS)
+                glVertex2f(cx, cy)
+                glEnd()
+            return
+
+        # 着弾後：全画面フラッシュ（減衰）＋稲妻再生成タイミングで軽く増幅
+        fa = max(0.0, 1.0 - strike_f / self._THUNDER_FLASH_FRAMES)
+        flick = 0.15 if (strike_f <= self._THUNDER_BOLT_FLICKER and
+                         strike_f % 2 == 0) else 0.0
         alpha = min(0.9, fa * 0.8 + flick)
         if alpha > 0.0:
             glColor4f(0.82, 0.9, 1.0, alpha)   # やや青白
@@ -891,8 +945,8 @@ class Mode4Gesture(BaseMode):
             glVertex2f(0.0, vh)
             glEnd()
         # 稲妻本体（外グロー＋白コアの 2 パス）
-        if self._thunder_bolt and f <= self._THUNDER_BOLT_FLICKER + 4:
-            bolt_alpha = max(0.0, 1.0 - f / (self._THUNDER_BOLT_FLICKER + 4))
+        if self._thunder_bolt and strike_f <= self._THUNDER_BOLT_FLICKER + 4:
+            bolt_alpha = max(0.0, 1.0 - strike_f / (self._THUNDER_BOLT_FLICKER + 4))
 
             def _strip():
                 glBegin(GL_LINE_STRIP)
@@ -910,7 +964,7 @@ class Mode4Gesture(BaseMode):
             glPointSize(max(18.0, short * 0.05))
             glColor4f(0.9, 0.95, 1.0, bolt_alpha)
             glBegin(GL_POINTS)
-            glVertex2f(self._thunder_x * vw, self._thunder_y * vh)
+            glVertex2f(cx, cy)
             glEnd()
 
     # --- パーティクル -------------------------------------------------------

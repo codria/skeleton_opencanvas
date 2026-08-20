@@ -26,12 +26,14 @@ SOUND_MAP: dict[str, str] = {
     "right_step":   "食べ物をパクッ",  # 右足が下（接地側）に切り替わった瞬間
     "left_step":    "可愛い動作",      # 左足が下（接地側）に切り替わった瞬間
     "crouch":       "しょげる",        # 静止しゃがみ姿勢
-    # 魔法モード（火）
-    "magic_charge": "火炎魔法1",
-    "magic_hit":    "爆発1",
-    # 魔法モード（吹雪＝右腕 / 雷＝左腕）。未 DL でも起動可（無音になるだけ）。
-    "magic_ice":     "吹雪",
-    "magic_thunder": "雷",
+    # 魔法モード：各系統に「構え（charge）」と「着弾（hit）」の 2 音。
+    # 火＝両腕 / 氷＝右腕 / 雷＝左腕。未 DL でも起動可（無音になるだけ）。
+    "magic_fire_charge":    "火炎魔法1",
+    "magic_fire_hit":       "爆発1",
+    "magic_ice_charge":     "氷魔法2",
+    "magic_ice_hit":        "氷魔法で凍結",
+    "magic_thunder_charge": "雷魔法3",
+    "magic_thunder_hit":    "雷魔法4",
 }
 
 _SUPPORTED_EXTS = (".mp3", ".wav", ".ogg")
