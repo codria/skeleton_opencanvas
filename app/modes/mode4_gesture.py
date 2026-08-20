@@ -22,14 +22,16 @@ from OpenGL.GL import (
     glClearColor, glClear,
     glMatrixMode, glLoadIdentity, glOrtho, glViewport,
     glEnable, glDisable, glColor3f, glColor4f, glLineWidth, glPointSize,
-    glBegin, glEnd, glVertex2f, glBlendFunc, glHint,
+    glBegin, glEnd, glVertex2f, glBlendFunc, glHint, glGetFloatv,
     GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
     GL_PROJECTION, GL_MODELVIEW,
     GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP, GL_POINTS, GL_QUADS,
+    GL_TRIANGLE_FAN,
     GL_DEPTH_TEST, GL_LIGHTING, GL_BLEND,
     GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE,
     GL_LINE_SMOOTH, GL_LINE_SMOOTH_HINT,
     GL_POINT_SMOOTH, GL_POINT_SMOOTH_HINT,
+    GL_ALIASED_POINT_SIZE_RANGE, GL_SMOOTH_POINT_SIZE_RANGE,
     GL_NICEST,
 )
 
@@ -169,6 +171,16 @@ class Mode4Gesture(BaseMode):
 
     def initialize(self) -> None:
         self._camera_overlay.initialize()
+        # ドライバの点サイズ上限を記録（円形グローが点に潰れる不具合の切り分け用）。
+        # 大きいグローは三角形ファンで描くので描画自体は上限に依存しないが、
+        # 環境調査のためログに残す。
+        try:
+            aliased = glGetFloatv(GL_ALIASED_POINT_SIZE_RANGE)
+            smooth = glGetFloatv(GL_SMOOTH_POINT_SIZE_RANGE)
+            logger.info(f"GL point-size range: aliased={tuple(aliased)} "
+                        f"smooth={tuple(smooth)}")
+        except Exception as e:
+            logger.debug(f"点サイズ範囲の取得に失敗: {e}")
         logger.info("Mode4Gesture 初期化完了")
 
     def _reset_magic(self) -> None:
@@ -665,10 +677,30 @@ class Mode4Gesture(BaseMode):
         glLoadIdentity()
         glViewport(vx, vy, vw, vh)
 
+    # --- 円形グロー（ドライバの点サイズ上限に依存しない実装）----------------
+
+    def _draw_glow(self, cx: float, cy: float, radius: float,
+                   r: float, g: float, b: float, alpha: float,
+                   segments: int = 24) -> None:
+        """中心が (r,g,b,alpha)・外周が α=0 の放射グラデ円盤を三角形ファンで描く。
+        巨大な glPointSize は多くの GPU で最大点サイズにクランプされ「ただの点」に
+        潰れるため、大きい円形エフェクトはこの円盤で描く（加算合成前提）。
+        """
+        if radius <= 0.5:
+            return
+        glBegin(GL_TRIANGLE_FAN)
+        glColor4f(r, g, b, alpha)
+        glVertex2f(cx, cy)
+        glColor4f(r, g, b, 0.0)
+        for i in range(segments + 1):
+            a = math.tau * i / segments
+            glVertex2f(cx + math.cos(a) * radius, cy + math.sin(a) * radius)
+        glEnd()
+
     # --- 火球コア（レイヤー glow）-------------------------------------------
 
     def _draw_fireball_core(self, vw: int, vh: int, pulsing: bool) -> None:
-        """火球本体：5 層の同心 GL_POINTS で「にじむ光球」を作る。
+        """火球本体：5 層の同心円盤グローで「にじむ光球」を作る。
         pulsing=True なら charging 中のサイズ脈動を掛ける。
         """
         short = min(vw, vh)
@@ -687,12 +719,8 @@ class Mode4Gesture(BaseMode):
             (0.55, 0.95, 1.0, 1.0, 0.85),   # 白熱コア
         )
         for scale, alpha, r, g, b in layers:
-            pt = max(4.0, size * short * 2.0 * scale)
-            glPointSize(pt)
-            glColor4f(r, g, b, alpha)
-            glBegin(GL_POINTS)
-            glVertex2f(cx, cy)
-            glEnd()
+            radius = max(2.0, size * short * scale)
+            self._draw_glow(cx, cy, radius, r, g, b, alpha)
 
     # --- チャージ用エフェクト -----------------------------------------------
 
@@ -823,28 +851,20 @@ class Mode4Gesture(BaseMode):
     def _draw_explosion_flash(self, vw: int, vh: int) -> None:
         """爆発中央の白熱フラッシュ。最初の数フレームで一気に出て急速フェード。"""
         short = min(vw, vh)
-        # 序盤ほど明るい：0 で最大、6 フレームで消える
+        # 序盤ほど明るい：0 で最大、8 フレームで消える
         f = self._magic_frames
         flash_life = 8.0
         if f > flash_life:
             return
         t = f / flash_life
         alpha = (1.0 - t) ** 2
-        # フラッシュはコアより大きい
-        pt_outer = max(20.0, self._magic_size * short * 4.5 * (1.0 + t * 1.5))
-        pt_inner = pt_outer * 0.55
+        # フラッシュはコアより大きい（半径 = 旧点サイズ/2）
+        r_outer = max(10.0, self._magic_size * short * 2.25 * (1.0 + t * 1.5))
+        r_inner = r_outer * 0.55
         cx = self._magic_x * vw
         cy = self._magic_y * vh
-        glPointSize(pt_outer)
-        glColor4f(1.0, 0.7, 0.3, alpha * 0.7)
-        glBegin(GL_POINTS)
-        glVertex2f(cx, cy)
-        glEnd()
-        glPointSize(pt_inner)
-        glColor4f(1.0, 0.98, 0.85, alpha)
-        glBegin(GL_POINTS)
-        glVertex2f(cx, cy)
-        glEnd()
+        self._draw_glow(cx, cy, r_outer, 1.0, 0.7, 0.3, alpha * 0.7)
+        self._draw_glow(cx, cy, r_inner, 1.0, 0.98, 0.85, alpha)
 
     # --- 溜め火花（RESOLVE 中の手元フィードバック）--------------------------
 
@@ -898,7 +918,7 @@ class Mode4Gesture(BaseMode):
             ])
 
     def _draw_ice_core(self, vw: int, vh: int) -> None:
-        """右手先の寒色グロー（噴射口）。3 層の淡いシアン。"""
+        """右手先の寒色グロー（噴射口）。3 層の淡いシアン円盤。"""
         short = min(vw, vh)
         cx = self._ice_hand[0] * vw
         cy = self._ice_hand[1] * vh
@@ -908,11 +928,7 @@ class Mode4Gesture(BaseMode):
             (0.022, 0.75, 0.90, 0.98, 1.0),
         )
         for rad, alpha, r, g, b in layers:
-            glPointSize(max(4.0, rad * short * 2.0))
-            glColor4f(r, g, b, alpha)
-            glBegin(GL_POINTS)
-            glVertex2f(cx, cy)
-            glEnd()
+            self._draw_glow(cx, cy, max(2.0, rad * short), r, g, b, alpha)
 
     # --- 雷エフェクト -------------------------------------------------------
 
@@ -932,11 +948,7 @@ class Mode4Gesture(BaseMode):
                 (0.06, 0.25 * t, 0.7, 0.85, 1.0),
                 (0.03, 0.60 * t, 0.9, 0.97, 1.0),
             ):
-                glPointSize(max(4.0, scale * short * 2.0))
-                glColor4f(r, g, b, alpha)
-                glBegin(GL_POINTS)
-                glVertex2f(cx, cy)
-                glEnd()
+                self._draw_glow(cx, cy, max(2.0, scale * short), r, g, b, alpha)
             return
 
         # 着弾後：全画面フラッシュ（減衰）＋稲妻再生成タイミングで軽く増幅
@@ -968,12 +980,9 @@ class Mode4Gesture(BaseMode):
             glLineWidth(3.5)
             glColor4f(1.0, 1.0, 1.0, bolt_alpha)
             _strip()
-            # 着弾点フラッシュ
-            glPointSize(max(18.0, short * 0.05))
-            glColor4f(0.9, 0.95, 1.0, bolt_alpha)
-            glBegin(GL_POINTS)
-            glVertex2f(cx, cy)
-            glEnd()
+            # 着弾点フラッシュ（円盤グロー）
+            self._draw_glow(cx, cy, max(10.0, short * 0.04),
+                            0.9, 0.95, 1.0, bolt_alpha)
 
     # --- パーティクル -------------------------------------------------------
 
