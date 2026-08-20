@@ -108,7 +108,9 @@ class Mode4Gesture(BaseMode):
     _ICE_LIFE: float = 16.0                      # 氷粒子の寿命（frame）
     _ICE_END_TOLERANCE: int = 4                  # 右腕を下ろして何フレームで終了とみなすか
     # 雷（左腕のみ・一発）。溜め（構え音＋帯電）→ 着弾（フラッシュ＋稲妻）の 2 段。
-    _THUNDER_CHARGE_FRAMES: int = 10             # 着弾前の溜めフレーム（構え音の尺に合わせる）
+    _THUNDER_CHARGE_FRAMES: int = 30             # 着弾前の溜めフレーム（~1s @30fps）
+    # 構え音（雷魔法3）は尺が長いので、溜め終了に音が消え切るよう手前でフェード開始。
+    _THUNDER_CHARGE_FADE_FRAMES: int = 9         # 溜め終了の何フレーム手前からフェードするか
     _THUNDER_FRAMES: int = 22                    # 着弾後の表示総フレーム
     _THUNDER_FLASH_FRAMES: int = 10              # 全画面フラッシュの減衰フレーム（着弾起点）
     _THUNDER_BOLT_FLICKER: int = 12             # 稲妻を再生成してちらつかせる期間
@@ -578,6 +580,12 @@ class Mode4Gesture(BaseMode):
             # 溜め：手元に帯電スパークを集める
             if random.random() < 0.9:
                 self._spawn_gather_spark(self._thunder_x, self._thunder_y)
+            # 構え音は尺が長いので、溜め終了時刻に消え切るよう手前からフェード開始
+            if self._thunder_frames == cf - self._THUNDER_CHARGE_FADE_FRAMES:
+                self._sound_bank.fadeout(
+                    "magic_thunder_charge",
+                    ms=int(self._THUNDER_CHARGE_FADE_FRAMES / 30.0 * 1000),
+                )
         elif self._thunder_frames == cf:
             # 着弾：稲妻生成＋全画面フラッシュ（描画側）＋着弾音＋デブリ
             self._gen_thunder_bolt()
