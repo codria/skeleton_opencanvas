@@ -5,9 +5,13 @@ mode4_gesture.py
 サブモード（楽器 / 魔法）でジェスチャー連動の効果音・エフェクトを出す。
 
 サブモード:
-    instrument : 右腕/左腕/ジャンプ/しゃがみで別々の音を鳴らす
-    magic      : 両腕を肩以上に上げると火玉 charging、
-                 両腕を下ろすと火玉が発射→着弾で爆発
+    instrument : 右腕/左腕/足踏み/しゃがみで別々の音を鳴らす
+    magic      : 腕の上げ方で 3 系統の魔法を分岐（両腕=火 / 右腕=吹雪 / 左腕=雷）
+                 ・両腕を上げる → 火球チャージ、腕を振ってその方向に発射→着弾爆発
+                 ・右腕だけ上げる → 吹雪（腕を上げている間、手先方向へ氷を噴射）
+                 ・左腕だけ上げる → 雷（全画面フラッシュ＋稲妻が落ちる一発）
+                 片腕→もう片腕を待つ猶予（grace）で「両腕/片腕」を判定するので、
+                 同時に上げられなくても両腕魔法を出せる。
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from OpenGL.GL import (
     glBegin, glEnd, glVertex2f, glBlendFunc, glHint,
     GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
     GL_PROJECTION, GL_MODELVIEW,
-    GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP, GL_POINTS,
+    GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP, GL_POINTS, GL_QUADS,
     GL_DEPTH_TEST, GL_LIGHTING, GL_BLEND,
     GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE,
     GL_LINE_SMOOTH, GL_LINE_SMOOTH_HINT,
@@ -48,7 +52,15 @@ class Mode4Gesture(BaseMode):
     }
     MIN_VIS = 0.4
 
-    # 魔法モードの内部状態
+    # 魔法モードの上位フェーズ（どの系統の魔法を発動中か）
+    _PH_IDLE = "idle"          # 待機（腕上げ待ち）
+    _PH_RESOLVE = "resolve"    # 片腕検知→もう片腕を待つ猶予中（火/片腕を確定させる）
+    _PH_FIRE = "fire"          # 火球（両腕）
+    _PH_ICE = "ice"            # 吹雪（右腕のみ・持続）
+    _PH_THUNDER = "thunder"    # 雷（左腕のみ・一発）
+    _PH_COOLDOWN = "cooldown"  # 発動後、腕が下りるまで再発火を抑止
+
+    # 火球の内部サブ状態（_PH_FIRE の中でのみ使う）
     _MAGIC_IDLE = "idle"
     _MAGIC_CHARGING = "charging"
     _MAGIC_FLYING = "flying"
@@ -83,6 +95,25 @@ class Mode4Gesture(BaseMode):
     _MAGIC_EXPLOSION_PARTICLES: int = 48         # 爆発時パーティクル数
     _MAGIC_SHOCKWAVE_RADIUS: float = 0.28        # 衝撃波リング最大半径（画像座標比）
 
+    # --- 3 系統分岐（腕の上げ方）---
+    # 片腕を検知してから、もう片腕が上がるかを待つ猶予。両腕同時は難しいので
+    # この猶予内に 2 本目が上がれば「両腕（火）」、上がらなければ「片腕」に確定。
+    _MAGIC_ARM_GRACE_FRAMES: int = 8             # ~250ms @30fps
+    # 火球 charging 中、両腕を下ろし続けたら不発にして cooldown に戻す猶予
+    _FIRE_ABANDON_FRAMES: int = 20               # ~0.7s
+    # 吹雪（右腕のみ・持続）
+    _ICE_SPAWN_PER_FRAME: int = 4                # 1 フレームに撒く氷粒子数
+    _ICE_SPEED: float = 0.035                    # 噴射初速（画像座標/frame）
+    _ICE_SPREAD: float = 0.5                     # 噴射の広がり半角（rad）
+    _ICE_LIFE: float = 16.0                      # 氷粒子の寿命（frame）
+    _ICE_END_TOLERANCE: int = 4                  # 右腕を下ろして何フレームで終了とみなすか
+    # 雷（左腕のみ・一発）
+    _THUNDER_FRAMES: int = 22                    # 表示総フレーム
+    _THUNDER_FLASH_FRAMES: int = 10              # 全画面フラッシュの減衰フレーム
+    _THUNDER_BOLT_FLICKER: int = 12             # 稲妻を再生成してちらつかせる期間
+    _THUNDER_SEGMENTS: int = 16                  # 稲妻のジグザグ分割数
+    _THUNDER_JITTER: float = 0.05                # 稲妻の横ブレ幅（画像座標比）
+
     def __init__(self, config) -> None:
         self._config = config
         self._sub_mode: str = "instrument"
@@ -92,7 +123,11 @@ class Mode4Gesture(BaseMode):
         self._sound_bank = SoundBank("assets/sounds")
         self._detector = GestureDetector()
 
-        # 魔法モード状態
+        # 魔法モード上位フェーズ
+        self._magic_phase = self._PH_IDLE
+        self._resolve_frames: int = 0   # RESOLVE 猶予の経過フレーム
+
+        # 火球（_PH_FIRE）状態
         self._magic_state = self._MAGIC_IDLE
         self._magic_x: float = 0.5    # 画像座標 0-1
         self._magic_y: float = 0.5
@@ -100,9 +135,21 @@ class Mode4Gesture(BaseMode):
         self._magic_vy: float = 0.0
         self._magic_size: float = 0.02   # 半径（画像座標比）
         self._magic_frames: int = 0
+        self._fire_abandon: int = 0   # charging 中に両腕を下ろし続けたフレーム数
         # 発射時の飛翔方向計算のため、charging 中の両手中央位置履歴
         # 直近 _MAGIC_HAND_HISTORY フレーム分保持し、発射時に位置差ベクトルを速度化
         self._magic_hand_history: list[tuple[float, float]] = []
+
+        # 吹雪（_PH_ICE）状態
+        self._ice_frames: int = 0
+        self._ice_lost: int = 0       # 右腕を下ろして経過したフレーム数
+        self._ice_hand: tuple[float, float] = (0.5, 0.5)
+
+        # 雷（_PH_THUNDER）状態
+        self._thunder_frames: int = 0
+        self._thunder_x: float = 0.5  # 着弾（＝左手）位置
+        self._thunder_y: float = 0.5
+        self._thunder_bolt: list[tuple[float, float]] = []  # 稲妻の折れ線（画像座標）
 
         # エフェクト状態
         # particles: 各要素 = [x, y, vx, vy, life, max_life, size, r, g, b]
@@ -121,13 +168,24 @@ class Mode4Gesture(BaseMode):
         self._camera_overlay.initialize()
         logger.info("Mode4Gesture 初期化完了")
 
+    def _reset_magic(self) -> None:
+        """魔法モードの全フェーズ・エフェクト状態を初期化する。"""
+        self._magic_phase = self._PH_IDLE
+        self._magic_state = self._MAGIC_IDLE
+        self._resolve_frames = 0
+        self._fire_abandon = 0
+        self._ice_frames = 0
+        self._ice_lost = 0
+        self._thunder_frames = 0
+        self._magic_hand_history.clear()
+        self._thunder_bolt.clear()
+        self._particles.clear()
+        self._flight_trail.clear()
+
     def on_mode_enter(self) -> None:
         # 状態リセット（前回の魔法状態などを持ち越さない）
         self._detector.reset()
-        self._magic_state = self._MAGIC_IDLE
-        self._magic_hand_history.clear()
-        self._particles.clear()
-        self._flight_trail.clear()
+        self._reset_magic()
         self._prev_right_arm_up = False
         self._prev_left_arm_up = False
         logger.info(f"モード4（体験）開始 サブモード={self._sub_mode}")
@@ -136,6 +194,9 @@ class Mode4Gesture(BaseMode):
         # 継続再生中の右腕ドラムロール音は短くフェードして止める
         # （左腕シンバルは短音なので放置で自然に減衰）
         self._sound_bank.fadeout("right_arm_up", ms=150)
+        # 魔法の継続音（火チャージ・吹雪）も念のためフェード
+        self._sound_bank.fadeout("magic_charge", ms=150)
+        self._sound_bank.fadeout("magic_ice", ms=150)
         logger.info("モード4（体験）終了")
 
     def draw(self, frame, results, width: int, height: int) -> None:
@@ -248,77 +309,177 @@ class Mode4Gesture(BaseMode):
     # --- 魔法サブモード ------------------------------------------------------
 
     def _update_and_draw_magic(self, results, vx, vy, vw, vh) -> None:
-        """魔法の状態機械更新 + 火玉描画。魔法モード独自の判定ロジック：
-        - 構え判定：両手首が「肩から腰の 20% 下ライン」より上（腕が疲れない緩めの閾値）
-        - 火球サイズ：両手首の距離に比例（大きく広げると大きな火球）
-        - 発射トリガー：charging 中に両手中央を LAUNCH_SPEED 以上のスピードで振ったら発射。
-          そのスイングベクトル × VEL_SCALE を初速に。構えを解除しても charging は継続。
+        """魔法モードの上位ディスパッチャ。腕の上げ方で 3 系統に分岐する。
+        フェーズ遷移：
+            IDLE → RESOLVE →（両腕:FIRE / 右腕:ICE / 左腕:THUNDER）→ COOLDOWN → IDLE
+        RESOLVE は「片腕を検知してからもう片腕を待つ猶予」で、両腕同時に上げなくても
+        火球（両腕魔法）が出せるようにするための緩衝。COOLDOWN は発動後に腕が下りるまで
+        再発火を抑止する。
         """
-        # ---- ランドマークから必要情報を抽出 ----
+        info = self._extract_magic_pose(results)
+
+        phase = self._magic_phase
+        if phase == self._PH_IDLE:
+            self._magic_idle(info)
+        elif phase == self._PH_RESOLVE:
+            self._magic_resolve(info)
+        elif phase == self._PH_FIRE:
+            self._update_fire(info)
+        elif phase == self._PH_ICE:
+            self._update_ice(info)
+        elif phase == self._PH_THUNDER:
+            self._update_thunder(info)
+        elif phase == self._PH_COOLDOWN:
+            self._magic_cooldown(info)
+
+        # パーティクルは全フェーズ共通で進める（発動終了後の余韻も描くため）
+        self._update_particles()
+
+        # ---- 描画 ----
+        active = self._magic_phase in (
+            self._PH_RESOLVE, self._PH_FIRE, self._PH_ICE, self._PH_THUNDER)
+        if not active and not self._particles and not self._flight_trail:
+            return
+        self._setup_2d(vx, vy, vw, vh)
+        # 雷は全画面フラッシュ＋稲妻を最初に敷く
+        if self._magic_phase == self._PH_THUNDER:
+            self._draw_thunder(vw, vh)
+        # 火の飛翔尾
+        if self._flight_trail:
+            self._draw_flight_trail(vw, vh)
+        # 系統別コア
+        if self._magic_phase == self._PH_FIRE:
+            if self._magic_state == self._MAGIC_CHARGING:
+                self._draw_fireball_core(vw, vh, pulsing=True)
+                self._draw_charge_rays(vw, vh)
+            elif self._magic_state == self._MAGIC_FLYING:
+                self._draw_fireball_core(vw, vh, pulsing=False)
+            elif self._magic_state == self._MAGIC_EXPLODE:
+                self._draw_explosion_flash(vw, vh)
+                self._draw_shockwave(vw, vh)
+        elif self._magic_phase == self._PH_ICE:
+            self._draw_ice_core(vw, vh)
+        # パーティクル（最後に上乗せ）
+        self._draw_particles(vw, vh)
+
+    # --- ポーズ抽出 & 腕判定 ------------------------------------------------
+
+    def _extract_magic_pose(self, results):
+        """魔法判定に必要な情報を dict で返す。必要ランドマークが揃わなければ None。
+        戻り値キー：
+            r_up / l_up   : 右腕 / 左腕が「肩〜腰の RATIO 下ライン」より上か
+            rc / lc       : 右手首 / 左手首 (x, y)（不可視なら None）
+            both_c / span : 両手中央 (x, y) と両手間距離（両手可視時のみ、他は None/0）
+            rs            : 右肩 (x, y)（吹雪の噴射方向用）
+        """
+        if not results:
+            return None
+        lms = results[0].landmarks
         LS, RS = 11, 12
         LW, RW = 15, 16
         LH, RH = 23, 24
         VIS = 0.5
+        # 肩・腰が両方見えないと閾値ラインが引けない
+        if not (lms[LS].visibility >= VIS and lms[RS].visibility >= VIS and
+                lms[LH].visibility >= VIS and lms[RH].visibility >= VIS):
+            return None
+        shoulder_y = (lms[LS].y + lms[RS].y) / 2
+        hip_y = (lms[LH].y + lms[RH].y) / 2
+        thresh_y = shoulder_y + (hip_y - shoulder_y) * self._MAGIC_CHARGE_ARM_RATIO
 
-        charge_pose = False    # 構えポーズが成立しているか
-        hand_x = hand_y = None
-        hand_width = 0.0
-        if results:
-            lms = results[0].landmarks
-            if (lms[LS].visibility >= VIS and lms[RS].visibility >= VIS and
-                    lms[LW].visibility >= VIS and lms[RW].visibility >= VIS and
-                    lms[LH].visibility >= VIS and lms[RH].visibility >= VIS):
-                shoulder_y = (lms[LS].y + lms[RS].y) / 2
-                hip_y = (lms[LH].y + lms[RH].y) / 2
-                # 構え許容ライン Y = shoulder_y から hip_y に向かって RATIO 進んだ位置
-                # 画像座標は上端 0 / 下端 1 なので、この Y より小さい（上）ならポーズ OK
-                thresh_y = shoulder_y + (hip_y - shoulder_y) * self._MAGIC_CHARGE_ARM_RATIO
-                if lms[LW].y < thresh_y and lms[RW].y < thresh_y:
-                    charge_pose = True
-                # 両手中央 & 距離
-                hand_x = (lms[LW].x + lms[RW].x) / 2
-                hand_y = (lms[LW].y + lms[RW].y) / 2
-                dx = lms[LW].x - lms[RW].x
-                dy = lms[LW].y - lms[RW].y
-                hand_width = (dx * dx + dy * dy) ** 0.5
+        rw_vis = lms[RW].visibility >= VIS
+        lw_vis = lms[LW].visibility >= VIS
+        r_up = rw_vis and lms[RW].y < thresh_y
+        l_up = lw_vis and lms[LW].y < thresh_y
+        rc = (lms[RW].x, lms[RW].y) if rw_vis else None
+        lc = (lms[LW].x, lms[LW].y) if lw_vis else None
+        both_c = None
+        span = 0.0
+        if rw_vis and lw_vis:
+            both_c = ((lms[LW].x + lms[RW].x) / 2, (lms[LW].y + lms[RW].y) / 2)
+            dx = lms[LW].x - lms[RW].x
+            dy = lms[LW].y - lms[RW].y
+            span = (dx * dx + dy * dy) ** 0.5
+        return {
+            "r_up": r_up, "l_up": l_up,
+            "rc": rc, "lc": lc, "both_c": both_c, "span": span,
+            "rs": (lms[RS].x, lms[RS].y),
+        }
 
-        # 位置履歴を更新（発射時の速度ベクトル用）
-        if hand_x is not None and hand_y is not None:
-            self._magic_hand_history.append((hand_x, hand_y))
-            if len(self._magic_hand_history) > self._MAGIC_HAND_HISTORY:
-                self._magic_hand_history.pop(0)
+    def _magic_idle(self, info) -> None:
+        """待機。どちらかの腕が上がったら RESOLVE へ。"""
+        if info is None:
+            return
+        if info["r_up"] or info["l_up"]:
+            self._magic_phase = self._PH_RESOLVE
+            self._resolve_frames = 0
 
-        # ---- 状態機械 ----
-        if self._magic_state == self._MAGIC_IDLE:
-            if charge_pose and hand_x is not None:
-                self._magic_state = self._MAGIC_CHARGING
-                self._magic_x = hand_x
-                self._magic_y = hand_y
-                self._magic_size = self._MAGIC_FIREBALL_MIN
-                self._magic_frames = 0
-                # 腕を上げてきた履歴はここで捨て、charging 中の動きだけを
-                # 発射スイング判定の対象にする（現フレームだけ再挿入）
-                self._magic_hand_history.clear()
-                self._magic_hand_history.append((hand_x, hand_y))
-                self._sound_bank.play("magic_charge")
-                logger.info("[Mode4/魔法] charging 開始")
+    def _magic_resolve(self, info) -> None:
+        """片腕検知後の猶予。両腕なら火、猶予切れで片腕確定。
+        トラッキングが切れたフレームは判定を進めず保留（誤確定を避ける）。
+        """
+        if info is None:
+            return
+        self._resolve_frames += 1
+        r, l = info["r_up"], info["l_up"]
+        if r and l:
+            self._start_fire(info)
+        elif not r and not l:
+            # 猶予中に両腕とも下りた → 中断
+            self._magic_phase = self._PH_IDLE
+        elif self._resolve_frames >= self._MAGIC_ARM_GRACE_FRAMES:
+            if r:
+                self._start_ice(info)
+            else:
+                self._start_thunder(info)
+        else:
+            # 待機中：上がっている手元に「溜め」の火花を少しだけ出す
+            hand = info["rc"] if r else info["lc"]
+            if hand is not None and random.random() < 0.5:
+                self._spawn_gather_spark(hand[0], hand[1])
 
-        elif self._magic_state == self._MAGIC_CHARGING:
+    def _magic_cooldown(self, info) -> None:
+        """発動後、腕が下りる（またはトラッキング喪失）まで再発火を抑止。"""
+        if info is None or (not info["r_up"] and not info["l_up"]):
+            self._magic_phase = self._PH_IDLE
+
+    # --- 火球（両腕）--------------------------------------------------------
+
+    def _start_fire(self, info) -> None:
+        cx, cy = info["both_c"]
+        self._magic_phase = self._PH_FIRE
+        self._magic_state = self._MAGIC_CHARGING
+        self._magic_x, self._magic_y = cx, cy
+        self._magic_size = self._MAGIC_FIREBALL_MIN
+        self._magic_frames = 0
+        self._fire_abandon = 0
+        # 腕を上げてきた履歴は捨て、charging 中の動きだけをスイング判定対象に
+        self._magic_hand_history.clear()
+        self._magic_hand_history.append((cx, cy))
+        self._sound_bank.play("magic_charge")
+        logger.info("[Mode4/魔法] 火：charging 開始")
+
+    def _update_fire(self, info) -> None:
+        if self._magic_state == self._MAGIC_CHARGING:
             self._magic_frames += 1
-            if hand_x is not None:
-                self._magic_x = hand_x
-                self._magic_y = hand_y
-                # 両手幅に応じた目標サイズ（min/max でクランプ）を lerp で滑らかに追従
+            if info is not None and info["both_c"] is not None:
+                cx, cy = info["both_c"]
+                self._magic_x, self._magic_y = cx, cy
+                self._magic_hand_history.append((cx, cy))
+                if len(self._magic_hand_history) > self._MAGIC_HAND_HISTORY:
+                    self._magic_hand_history.pop(0)
                 target = max(
                     self._MAGIC_FIREBALL_MIN,
                     min(self._MAGIC_FIREBALL_MAX,
-                        hand_width * self._MAGIC_FIREBALL_SCALE),
+                        info["span"] * self._MAGIC_FIREBALL_SCALE),
                 )
                 self._magic_size += (target - self._magic_size) * self._MAGIC_FIREBALL_LERP
-            # 軌道 spark を確率生成
+            # 両腕を下ろし続けたら不発（片腕が上がっていれば継続）
+            arms_down = (info is None) or (not info["r_up"] and not info["l_up"])
+            self._fire_abandon = self._fire_abandon + 1 if arms_down else 0
             if random.random() < self._MAGIC_CHARGE_SPARK_PROB:
                 self._spawn_charge_spark()
-            # 猶予フレームを過ぎたらスイング判定 → 閾値超で発射
+            # 猶予フレーム後にスイング判定
             launch_vel = None
             if self._magic_frames >= self._MAGIC_CHARGE_MIN_FRAMES:
                 launch_vel = self._check_swing_launch()
@@ -328,17 +489,20 @@ class Mode4Gesture(BaseMode):
                 self._magic_vx, self._magic_vy = launch_vel
                 self._flight_trail.clear()
                 logger.info(
-                    f"[Mode4/魔法] 発射 size={self._magic_size:.3f} "
+                    f"[Mode4/魔法] 火：発射 size={self._magic_size:.3f} "
                     f"v=({self._magic_vx:+.3f}, {self._magic_vy:+.3f})"
                 )
-            # ポーズ解除でのキャンセルはしない：構えを下ろしても charging は継続、
-            # 発射トリガーは常にスイング。
+            elif self._fire_abandon > self._FIRE_ABANDON_FRAMES:
+                # 振らずに腕を下ろしたまま → 不発にして cooldown へ
+                self._sound_bank.fadeout("magic_charge", ms=200)
+                self._magic_state = self._MAGIC_IDLE
+                self._magic_phase = self._PH_COOLDOWN
+                logger.info("[Mode4/魔法] 火：不発（スイングなし）")
 
         elif self._magic_state == self._MAGIC_FLYING:
             self._magic_x += self._magic_vx
             self._magic_y += self._magic_vy
             self._magic_frames += 1
-            # 軌跡・尾 spark
             self._flight_trail.append((self._magic_x, self._magic_y))
             if len(self._flight_trail) > self._MAGIC_FLIGHT_TRAIL_LEN:
                 self._flight_trail.pop(0)
@@ -351,37 +515,87 @@ class Mode4Gesture(BaseMode):
                 self._magic_frames = 0
                 self._spawn_explosion_burst()
                 self._sound_bank.play("magic_hit")
-                logger.info("[Mode4/魔法] 爆発")
+                logger.info("[Mode4/魔法] 火：爆発")
 
         elif self._magic_state == self._MAGIC_EXPLODE:
             self._magic_frames += 1
             if self._magic_frames > self._MAGIC_EXPLODE_FRAMES:
                 self._magic_state = self._MAGIC_IDLE
+                self._magic_phase = self._PH_COOLDOWN
                 self._flight_trail.clear()
 
-        # パーティクル更新（全状態共通、EXPLODE 完了後も生き残ってれば描く）
-        self._update_particles()
+    # --- 吹雪（右腕のみ・持続）----------------------------------------------
 
-        # ---- 描画 ----
-        # IDLE 中で余韻（particle / trail）もなければセットアップ含めて何もしない
-        if (self._magic_state == self._MAGIC_IDLE and
-                not self._particles and not self._flight_trail):
-            return
-        self._setup_2d(vx, vy, vw, vh)
-        # 尾（FLYING 中と、EXPLODE 直後の余韻）
-        if self._flight_trail:
-            self._draw_flight_trail(vw, vh)
-        # コア（IDLE 以外）
-        if self._magic_state == self._MAGIC_CHARGING:
-            self._draw_fireball_core(vw, vh, pulsing=True)
-            self._draw_charge_rays(vw, vh)
-        elif self._magic_state == self._MAGIC_FLYING:
-            self._draw_fireball_core(vw, vh, pulsing=False)
-        elif self._magic_state == self._MAGIC_EXPLODE:
-            self._draw_explosion_flash(vw, vh)
-            self._draw_shockwave(vw, vh)
-        # パーティクル（最後に上乗せ）
-        self._draw_particles(vw, vh)
+    def _start_ice(self, info) -> None:
+        self._magic_phase = self._PH_ICE
+        self._ice_frames = 0
+        self._ice_lost = 0
+        if info["rc"] is not None:
+            self._ice_hand = info["rc"]
+        self._sound_bank.play("magic_ice")
+        logger.info("[Mode4/魔法] 吹雪：開始")
+
+    def _update_ice(self, info) -> None:
+        self._ice_frames += 1
+        # 右腕が上がっていれば噴射継続、下りて（or 喪失して）一定フレームで終了
+        if info is not None and info["r_up"] and info["rc"] is not None:
+            self._ice_lost = 0
+            hx, hy = info["rc"]
+            self._ice_hand = (hx, hy)
+            sx, sy = info["rs"]
+            self._spawn_ice_burst(hx, hy, hx - sx, hy - sy)
+        else:
+            self._ice_lost += 1
+            if self._ice_lost > self._ICE_END_TOLERANCE:
+                self._magic_phase = self._PH_COOLDOWN
+                logger.info("[Mode4/魔法] 吹雪：終了")
+
+    # --- 雷（左腕のみ・一発）------------------------------------------------
+
+    def _start_thunder(self, info) -> None:
+        self._magic_phase = self._PH_THUNDER
+        self._thunder_frames = 0
+        tx, ty = info["lc"] if info["lc"] is not None else (0.5, 0.3)
+        self._thunder_x, self._thunder_y = tx, ty
+        self._gen_thunder_bolt()
+        # 着弾点にデブリ火花
+        for i in range(16):
+            a = math.tau * i / 16 + (random.random() - 0.5) * 0.3
+            spd = 0.010 + random.random() * 0.020
+            self._particles.append([
+                tx, ty,
+                math.cos(a) * spd, math.sin(a) * spd,
+                16.0 + random.random() * 6.0, 22.0, 0.010,
+                0.7, 0.85, 1.0,
+            ])
+        self._sound_bank.play("magic_thunder")
+        logger.info("[Mode4/魔法] 雷：着弾")
+
+    def _update_thunder(self, info) -> None:
+        self._thunder_frames += 1
+        # ちらつき：前半だけ稲妻を再生成
+        if (self._thunder_frames <= self._THUNDER_BOLT_FLICKER and
+                self._thunder_frames % 2 == 0):
+            self._gen_thunder_bolt()
+        if self._thunder_frames > self._THUNDER_FRAMES:
+            self._magic_phase = self._PH_COOLDOWN
+            self._thunder_bolt.clear()
+
+    def _gen_thunder_bolt(self) -> None:
+        """画面上端から着弾点まで、横ブレしながら落ちるジグザグ折れ線を生成。
+        着弾点に近づくほどブレを小さくして狙いを収束させる。"""
+        x_top = self._thunder_x + (random.random() - 0.5) * 0.06
+        tx, ty = self._thunder_x, self._thunder_y
+        n = self._THUNDER_SEGMENTS
+        pts: list[tuple[float, float]] = []
+        for i in range(n + 1):
+            t = i / n
+            base_x = x_top + (tx - x_top) * t
+            jitter = (random.random() - 0.5) * self._THUNDER_JITTER * (1.0 - t * 0.7)
+            pts.append((base_x + jitter, ty * t))
+        pts[0] = (x_top, 0.0)
+        pts[-1] = (tx, ty)
+        self._thunder_bolt = pts
 
     def _check_swing_launch(self) -> tuple[float, float] | None:
         """charging 中に毎フレーム呼ぶ。両手中央の LOOKBACK フレーム間位置差の
@@ -603,6 +817,102 @@ class Mode4Gesture(BaseMode):
         glVertex2f(cx, cy)
         glEnd()
 
+    # --- 溜め火花（RESOLVE 中の手元フィードバック）--------------------------
+
+    def _spawn_gather_spark(self, x: float, y: float) -> None:
+        """手元の周囲から中心へ吸い込まれる淡い白火花。まだ系統未確定なので中立色。"""
+        angle = random.random() * math.tau
+        r_init = 0.05 + random.random() * 0.03
+        inward = 0.012
+        self._particles.append([
+            x + math.cos(angle) * r_init,
+            y + math.sin(angle) * r_init,
+            -math.cos(angle) * inward, -math.sin(angle) * inward,
+            12.0, 12.0, 0.007,
+            0.85, 0.9, 1.0,
+        ])
+
+    # --- 吹雪パーティクル ---------------------------------------------------
+
+    def _spawn_ice_burst(self, hx: float, hy: float, dirx: float, diry: float) -> None:
+        """右手先から (dirx, diry) 方向へ、広がりを持たせて氷片を噴射する。"""
+        mag = (dirx * dirx + diry * diry) ** 0.5
+        if mag < 0.05:
+            # 腕がほぼ肩位置＝方向が不定 → 体の外側へ水平やや上に噴射
+            base = 0.0 if dirx >= 0 else math.pi
+        else:
+            base = math.atan2(diry, dirx)
+        for _ in range(self._ICE_SPAWN_PER_FRAME):
+            ang = base + (random.random() - 0.5) * 2.0 * self._ICE_SPREAD
+            spd = self._ICE_SPEED * (0.6 + random.random() * 0.5)
+            # 白〜シアンの寒色。少しだけ寿命・サイズをばらす
+            g = 0.85 + random.random() * 0.15
+            self._particles.append([
+                hx, hy,
+                math.cos(ang) * spd, math.sin(ang) * spd,
+                self._ICE_LIFE * (0.7 + random.random() * 0.6),
+                self._ICE_LIFE, 0.006 + random.random() * 0.004,
+                0.65 + random.random() * 0.15, g, 1.0,
+            ])
+
+    def _draw_ice_core(self, vw: int, vh: int) -> None:
+        """右手先の寒色グロー（噴射口）。3 層の淡いシアン。"""
+        short = min(vw, vh)
+        cx = self._ice_hand[0] * vw
+        cy = self._ice_hand[1] * vh
+        layers = (
+            (0.070, 0.18, 0.55, 0.80, 1.0),
+            (0.045, 0.30, 0.70, 0.90, 1.0),
+            (0.022, 0.75, 0.90, 0.98, 1.0),
+        )
+        for rad, alpha, r, g, b in layers:
+            glPointSize(max(4.0, rad * short * 2.0))
+            glColor4f(r, g, b, alpha)
+            glBegin(GL_POINTS)
+            glVertex2f(cx, cy)
+            glEnd()
+
+    # --- 雷エフェクト -------------------------------------------------------
+
+    def _draw_thunder(self, vw: int, vh: int) -> None:
+        """全画面フラッシュ＋稲妻。加算合成なので白系がそのまま強く光る。"""
+        short = min(vw, vh)
+        f = self._thunder_frames
+        # 全画面フラッシュ（減衰）＋稲妻再生成タイミングで軽く増幅
+        fa = max(0.0, 1.0 - f / self._THUNDER_FLASH_FRAMES)
+        flick = 0.15 if (f <= self._THUNDER_BOLT_FLICKER and f % 2 == 0) else 0.0
+        alpha = min(0.9, fa * 0.8 + flick)
+        if alpha > 0.0:
+            glColor4f(0.82, 0.9, 1.0, alpha)   # やや青白
+            glBegin(GL_QUADS)
+            glVertex2f(0.0, 0.0)
+            glVertex2f(vw, 0.0)
+            glVertex2f(vw, vh)
+            glVertex2f(0.0, vh)
+            glEnd()
+        # 稲妻本体（外グロー＋白コアの 2 パス）
+        if self._thunder_bolt and f <= self._THUNDER_BOLT_FLICKER + 4:
+            bolt_alpha = max(0.0, 1.0 - f / (self._THUNDER_BOLT_FLICKER + 4))
+
+            def _strip():
+                glBegin(GL_LINE_STRIP)
+                for x, y in self._thunder_bolt:
+                    glVertex2f(x * vw, y * vh)
+                glEnd()
+
+            glLineWidth(9.0)
+            glColor4f(0.55, 0.72, 1.0, bolt_alpha * 0.5)
+            _strip()
+            glLineWidth(3.5)
+            glColor4f(1.0, 1.0, 1.0, bolt_alpha)
+            _strip()
+            # 着弾点フラッシュ
+            glPointSize(max(18.0, short * 0.05))
+            glColor4f(0.9, 0.95, 1.0, bolt_alpha)
+            glBegin(GL_POINTS)
+            glVertex2f(self._thunder_x * vw, self._thunder_y * vh)
+            glEnd()
+
     # --- パーティクル -------------------------------------------------------
 
     def _update_particles(self) -> None:
@@ -654,10 +964,7 @@ class Mode4Gesture(BaseMode):
             self._prev_left_arm_up = False
             self._sub_mode = sub
             self._detector.reset()
-            self._magic_state = self._MAGIC_IDLE
-            self._magic_hand_history.clear()
-            self._particles.clear()
-            self._flight_trail.clear()
+            self._reset_magic()
             logger.info(f"Mode4 サブモード: {sub}")
 
     def toggle_sub_mode(self) -> str:

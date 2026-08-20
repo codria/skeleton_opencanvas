@@ -26,9 +26,12 @@ SOUND_MAP: dict[str, str] = {
     "right_step":   "食べ物をパクッ",  # 右足が下（接地側）に切り替わった瞬間
     "left_step":    "可愛い動作",      # 左足が下（接地側）に切り替わった瞬間
     "crouch":       "しょげる",        # 静止しゃがみ姿勢
-    # 魔法モード
+    # 魔法モード（火）
     "magic_charge": "火炎魔法1",
     "magic_hit":    "爆発1",
+    # 魔法モード（吹雪＝右腕 / 雷＝左腕）。未 DL でも起動可（無音になるだけ）。
+    "magic_ice":     "吹雪",
+    "magic_thunder": "雷",
 }
 
 _SUPPORTED_EXTS = (".mp3", ".wav", ".ogg")
