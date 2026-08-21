@@ -18,7 +18,7 @@ from OpenGL.GL import (
     glBlendFunc, glHint,
     GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
     GL_PROJECTION, GL_MODELVIEW,
-    GL_LINES, GL_POINTS, GL_QUADS, GL_TEXTURE_2D,
+    GL_LINES, GL_LINE_LOOP, GL_POINTS, GL_QUADS, GL_TEXTURE_2D,
     GL_DEPTH_TEST, GL_LIGHTING, GL_BLEND,
     GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
     GL_LINE_SMOOTH, GL_LINE_SMOOTH_HINT,
@@ -47,6 +47,10 @@ class GLWidget(QOpenGLWidget):
         self._gl_initialized = False
         self._show_bones = False  # Bキーで切り替え
         self._internal_fbo: QOpenGLFramebufferObject | None = None
+        # 検出エリア矩形（画像正規化 x,y,w,h）と、その可視化 ON/OFF。
+        # 可視化は UI 表示（H）に連動。フィルタ自体は PoseEstimator 側で常時有効。
+        self._detect_area: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+        self._show_detect_area = False
 
         logger.info("GLWidget 初期化")
 
@@ -104,6 +108,84 @@ class GLWidget(QOpenGLWidget):
     def show_bones(self) -> bool:
         return self._show_bones
 
+    def set_detect_area(self, x: float, y: float, w: float, h: float) -> None:
+        """検出エリア矩形（画像正規化）を更新して再描画する。"""
+        self._detect_area = (x, y, w, h)
+        self.update()
+
+    def set_show_detect_area(self, on: bool) -> None:
+        """検出エリア矩形の可視化 ON/OFF（UI 表示に連動）。"""
+        self._show_detect_area = bool(on)
+        self.update()
+
+    def draw_detect_area_overlay(self, area, frame, win_w: int, win_h: int) -> None:
+        """検出エリア矩形を描く。矩形外を薄暗くし、枠を緑で表示する。
+        座標はカメラ映像と同じアスペクト補正ビューポート内で解釈する。"""
+        ax, ay, aw, ah = area
+        # カメラアスペクトに合わせたビューポート（bone overlay と同じ計算）
+        if frame is not None:
+            cam_aspect = frame.shape[1] / frame.shape[0]
+        else:
+            cam_aspect = 16 / 9
+        win_aspect = win_w / win_h
+        if win_aspect > cam_aspect:
+            view_h = win_h
+            view_w = int(win_h * cam_aspect)
+            view_x = (win_w - view_w) // 2
+            view_y = 0
+        else:
+            view_w = win_w
+            view_h = int(win_w / cam_aspect)
+            view_x = 0
+            view_y = (win_h - view_h) // 2
+
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, view_w, view_h, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glViewport(view_x, view_y, view_w, view_h)
+
+        rx = ax * view_w
+        ry = ay * view_h
+        rw = aw * view_w
+        rh = ah * view_h
+
+        def _quad(x0, y0, x1, y1):
+            glBegin(GL_QUADS)
+            glVertex2f(x0, y0)
+            glVertex2f(x1, y0)
+            glVertex2f(x1, y1)
+            glVertex2f(x0, y1)
+            glEnd()
+
+        # 矩形外（除外領域）を薄暗く：左/右/上/下の 4 帯
+        glColor4f(0.0, 0.0, 0.0, 0.45)
+        if rx > 0:
+            _quad(0, 0, rx, view_h)                       # 左
+        if rx + rw < view_w:
+            _quad(rx + rw, 0, view_w, view_h)             # 右
+        if ry > 0:
+            _quad(rx, 0, rx + rw, ry)                     # 上
+        if ry + rh < view_h:
+            _quad(rx, ry + rh, rx + rw, view_h)           # 下
+
+        # 検出エリアの枠（緑）
+        glColor4f(0.2, 1.0, 0.4, 0.9)
+        glLineWidth(2.0)
+        glBegin(GL_LINE_LOOP)
+        glVertex2f(rx, ry)
+        glVertex2f(rx + rw, ry)
+        glVertex2f(rx + rw, ry + rh)
+        glVertex2f(rx, ry + rh)
+        glEnd()
+
+        glDisable(GL_BLEND)
+
     def paintGL(self) -> None:
         """二段階レンダリング:
           Stage 1: 内部 FBO (1280x720 固定) にモード描画
@@ -126,6 +208,8 @@ class GLWidget(QOpenGLWidget):
             self._active_mode.draw(self._frame, self._results, iw, ih)
             if self._show_bones and self._results:
                 self.draw_bone_overlay(self._results, self._frame, iw, ih)
+            if self._show_detect_area:
+                self.draw_detect_area_overlay(self._detect_area, self._frame, iw, ih)
         finally:
             self._internal_fbo.release()
 

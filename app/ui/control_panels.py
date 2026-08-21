@@ -401,6 +401,69 @@ class SmoothingControlPanel(QWidget):
         self._label.setText(f"{alpha:.2f}")
 
 
+class DetectAreaControlPanel(QWidget):
+    """検出エリア矩形（画像正規化 x, y, w, h）を 4 本のスライダーで調整する。
+    この矩形の外に鼻がある人物は判定対象から外れる（端の写り込み除外用）。
+    どれか 1 本でも動かすと area_changed(x, y, w, h) を emit する。
+    """
+
+    area_changed = pyqtSignal(float, float, float, float)  # x, y, w, h（各 0〜1）
+
+    RES = 1000
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setStyleSheet(VCTL_STYLE)
+        self.setFixedHeight(128)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 6, 12, 6)
+        root.setSpacing(3)
+
+        header = QLabel("検出エリア（端の写り込み除外）")
+        header.setStyleSheet(VCTL_LABEL_STYLE)
+        root.addWidget(header)
+
+        self._sliders: dict[str, QSlider] = {}
+        self._value_labels: dict[str, QLabel] = {}
+        for key, name in (("x", "左端"), ("y", "上端"), ("w", "幅"), ("h", "高さ")):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            prefix = QLabel(name)
+            prefix.setStyleSheet(VCTL_LABEL_STYLE)
+            prefix.setFixedWidth(40)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, self.RES)
+            slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            slider.valueChanged.connect(self._on_any_changed)
+            vlabel = QLabel("0.00")
+            vlabel.setStyleSheet(VCTL_LABEL_STYLE)
+            vlabel.setFixedWidth(42)
+            row.addWidget(prefix)
+            row.addWidget(slider, stretch=1)
+            row.addWidget(vlabel)
+            root.addLayout(row)
+            self._sliders[key] = slider
+            self._value_labels[key] = vlabel
+
+    def _values(self) -> tuple[float, float, float, float]:
+        return tuple(self._sliders[k].value() / self.RES for k in ("x", "y", "w", "h"))
+
+    def _on_any_changed(self, _v: int) -> None:
+        x, y, w, h = self._values()
+        for k, val in (("x", x), ("y", y), ("w", w), ("h", h)):
+            self._value_labels[k].setText(f"{val:.2f}")
+        self.area_changed.emit(x, y, w, h)
+
+    def set_values(self, x: float, y: float, w: float, h: float) -> None:
+        for k, val in (("x", x), ("y", y), ("w", w), ("h", h)):
+            s = self._sliders[k]
+            s.blockSignals(True)
+            s.setValue(max(0, min(self.RES, int(round(val * self.RES)))))
+            s.blockSignals(False)
+            self._value_labels[k].setText(f"{val:.2f}")
+
+
 class GraphSizeControlPanel(QWidget):
     """グラフ（X / Y 時系列）の表示サイズ係数スライダー。
     基準サイズ 360 x 180px に係数を掛けて固定サイズで描画する

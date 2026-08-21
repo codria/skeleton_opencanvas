@@ -39,6 +39,7 @@ class PoseEstimator:
         min_tracking_confidence: float,
         smoothing_alpha: float = 0.4,
         center_priority: bool = False,
+        detect_area: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
     ) -> None:
         """MediaPipe Pose Landmarker を初期化する。
 
@@ -61,6 +62,9 @@ class PoseEstimator:
         self._min_detection_confidence = min_detection_confidence
         self._min_tracking_confidence = min_tracking_confidence
         self._center_priority = bool(center_priority)
+        # 検出エリア（画像正規化 x, y, w, h）。この矩形外に代表点(鼻)がある人物は捨てる。
+        # 画面端に写り込んだ別人を判定対象から外す用途。(0,0,1,1) で無効（全画面）。
+        self._detect_area = self._sanitize_area(detect_area)
         # estimate と set_num_poses の排他用
         self._lock = threading.Lock()
 
@@ -90,6 +94,49 @@ class PoseEstimator:
         """EMA の追従係数を変更する。"""
         self._smoothing_alpha = max(0.05, min(1.0, alpha))
         logger.info(f"smoothing_alpha={self._smoothing_alpha}")
+
+    @staticmethod
+    def _sanitize_area(area: tuple[float, float, float, float]
+                       ) -> tuple[float, float, float, float]:
+        """検出エリアを [0,1] に収め、w/h が正になるよう整える。"""
+        x, y, w, h = area
+        x = max(0.0, min(1.0, float(x)))
+        y = max(0.0, min(1.0, float(y)))
+        w = max(0.01, min(1.0 - x, float(w)))
+        h = max(0.01, min(1.0 - y, float(h)))
+        return (x, y, w, h)
+
+    def set_detect_area(self, x: float, y: float, w: float, h: float) -> None:
+        """検出エリア（画像正規化 x,y,w,h）を変更する。範囲外の人物を除外する。"""
+        with self._lock:
+            self._detect_area = self._sanitize_area((x, y, w, h))
+            # 対象集合が変わりうるので平滑化状態はクリア
+            self._smoothed.clear()
+        logger.info(f"detect_area={self._detect_area}")
+
+    @property
+    def detect_area(self) -> tuple[float, float, float, float]:
+        return self._detect_area
+
+    @staticmethod
+    def _filter_by_area(pose_landmarks_list, world_lists,
+                        area: tuple[float, float, float, float]):
+        """代表点(NOSE=index0)が area 矩形外の人物を除外する。
+        戻り値: (filtered_pose_list, filtered_world_list, changed)。
+        area が全画面 (0,0,1,1) なら素通り（changed=False）。
+        """
+        ax, ay, aw, ah = area
+        if (ax, ay, aw, ah) == (0.0, 0.0, 1.0, 1.0):
+            return pose_landmarks_list, world_lists, False
+        kept = [
+            i for i, plm in enumerate(pose_landmarks_list)
+            if plm and (ax <= plm[0].x <= ax + aw) and (ay <= plm[0].y <= ay + ah)
+        ]
+        if len(kept) == len(pose_landmarks_list):
+            return pose_landmarks_list, world_lists, False
+        filtered_pl = [pose_landmarks_list[i] for i in kept]
+        filtered_wl = [world_lists[i] for i in kept if i < len(world_lists)]
+        return filtered_pl, filtered_wl, True
 
     @property
     def smoothing_alpha(self) -> float:
@@ -157,10 +204,23 @@ class PoseEstimator:
             a = self._smoothing_alpha
             world_lists = detection_result.pose_world_landmarks or []
 
-            # center_priority: 画面中央（0.5, 0.5）に NOSE が近い順にソートしてから
-            # num_poses に絞る。外縁部にちらっと写った人を選ばせない用途向け。
             pose_landmarks_list = list(detection_result.pose_landmarks)
             world_lists = list(world_lists)
+
+            # 検出エリア外の人物を除外（代表点=NOSE がエリア矩形の外なら捨てる）。
+            # 画面端に写り込んだ別人を判定対象から外す。全画面(0,0,1,1)なら素通り。
+            pose_landmarks_list, world_lists, changed = self._filter_by_area(
+                pose_landmarks_list, world_lists, self._detect_area
+            )
+            if changed:
+                # 集合が変わったフレームは EMA を新規扱いにする
+                self._smoothed.clear()
+            if not pose_landmarks_list:
+                self._smoothed.clear()
+                return []
+
+            # center_priority: 画面中央（0.5, 0.5）に NOSE が近い順にソートしてから
+            # num_poses に絞る。外縁部にちらっと写った人を選ばせない用途向け。
             if self._center_priority and len(pose_landmarks_list) > self._num_poses:
                 def _center_dist(pose_lm):
                     if not pose_lm:

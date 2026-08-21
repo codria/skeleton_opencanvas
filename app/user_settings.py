@@ -36,6 +36,12 @@ DEFAULTS: dict = {
     # 画面全体を左右反転（鏡表示）。カメラ入力を推定前に flip するので、
     # 骨格・グラフ・魔法エフェクトすべて自動的に mirror される。
     "mirror_display": False,
+    # 検出エリア（画像正規化 x,y,w,h）。この矩形の外に鼻がある人物は判定対象外。
+    # 既定は左右の端 1/8 ずつを除外（端に写り込む別人を弾く）。
+    "detect_area_x": 0.125,
+    "detect_area_y": 0.0,
+    "detect_area_w": 0.75,
+    "detect_area_h": 1.0,
 }
 
 

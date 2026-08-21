@@ -35,6 +35,7 @@ from app.ui.control_panels import (
     PoseControlPanel,
     SmoothingControlPanel,
     GraphSizeControlPanel,
+    DetectAreaControlPanel,
     Mode2ControlPanel,
     TrailControlPanel,
     OverlayControlPanel,
@@ -264,6 +265,16 @@ class MainWindow(QMainWindow):
             self._graph_x.set_font_scale(self._graph_scale)
             self._graph_y.set_font_scale(self._graph_scale)
 
+        # --- 検出エリアコントロール（全モード共通、常時表示）---
+        # 永続値を estimator（フィルタ）と GLWidget（矩形表示）に反映
+        self._estimator.set_detect_area(*self._app_settings.detect_area)
+        self._gl_widget.set_detect_area(*self._app_settings.detect_area)
+        self._gl_widget.set_show_detect_area(self._ui_visible)
+        self._detect_area_ctrl = DetectAreaControlPanel(self._gl_widget)
+        self._detect_area_ctrl.set_values(*self._app_settings.detect_area)
+        self._detect_area_ctrl.area_changed.connect(self._on_detect_area_changed)
+        self._detect_area_ctrl.raise_()
+
         # --- 軌跡コントロール（Mode2/3 アクティブ時のみ表示）---
         self._trail_ctrl = TrailControlPanel(self._gl_widget)
         self._trail_ctrl.hide()
@@ -387,6 +398,13 @@ class MainWindow(QMainWindow):
         if self._graph_size_ctrl.isVisible():
             slider_y += self._graph_size_ctrl.height() + 6
 
+        # 検出エリア（常時、_ui_visible 時のみ）
+        self._detect_area_ctrl.setGeometry(
+            left_x, slider_y, left_panel_w, self._detect_area_ctrl.height()
+        )
+        if self._detect_area_ctrl.isVisible():
+            slider_y += self._detect_area_ctrl.height() + 6
+
         # 軌跡コントロール（Mode2/3 時のみ）
         self._trail_ctrl.setGeometry(
             left_x, slider_y, left_panel_w, self._trail_ctrl.height()
@@ -486,6 +504,8 @@ class MainWindow(QMainWindow):
         self._pose_ctrl.setVisible(self._ui_visible)
         self._smoothing_ctrl.setVisible(self._ui_visible)
         self._graph_size_ctrl.setVisible(self._ui_visible)
+        self._detect_area_ctrl.setVisible(self._ui_visible)
+        self._gl_widget.set_show_detect_area(self._ui_visible)
         self._trail_ctrl.setVisible(self._ui_visible and self._current_mode_id in (2, 3))
         self._overlay_ctrl.setVisible(self._ui_visible and self._current_mode_id in (2, 3))
         self._mode2_ctrl.setVisible(
@@ -768,6 +788,18 @@ class MainWindow(QMainWindow):
     def _on_smoothing_alpha_changed(self, alpha: float) -> None:
         """指数移動平均の追従係数を変更する（リアルタイム反映）。"""
         self._estimator.set_smoothing_alpha(alpha)
+
+    def _on_detect_area_changed(self, x: float, y: float, w: float, h: float) -> None:
+        """検出エリアを変更する。矩形外の人物は判定対象から外れる。
+        w/h は x+w<=1, y+h<=1 になるようクランプし、フィルタ・矩形表示・永続化を一致させる。
+        """
+        x = min(max(x, 0.0), 1.0)
+        y = min(max(y, 0.0), 1.0)
+        w = min(max(w, 0.01), 1.0 - x)
+        h = min(max(h, 0.01), 1.0 - y)
+        self._app_settings.set_detect_area(x, y, w, h)
+        self._estimator.set_detect_area(x, y, w, h)
+        self._gl_widget.set_detect_area(x, y, w, h)
 
     def _on_graph_scale_changed(self, scale: float) -> None:
         """グラフ表示サイズの係数を変更する。文字サイズも連動。

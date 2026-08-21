@@ -46,6 +46,8 @@ class AppSettings(QObject):
     mode3_angle_changed = pyqtSignal(float)
     mannequin_style_changed = pyqtSignal(str)  # "primitive" | "mesh" | "hidden"
     mirror_display_changed = pyqtSignal(bool)
+    # 検出エリア（x, y, w, h）。4 値が連動するので専用シグナルでまとめて通知。
+    detect_area_changed = pyqtSignal(float, float, float, float)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -149,3 +151,23 @@ class AppSettings(QObject):
     @property
     def mirror_display(self) -> bool:
         return bool(self._values["mirror_display"])
+
+    @property
+    def detect_area(self) -> tuple[float, float, float, float]:
+        return (
+            float(self._values["detect_area_x"]),
+            float(self._values["detect_area_y"]),
+            float(self._values["detect_area_w"]),
+            float(self._values["detect_area_h"]),
+        )
+
+    def set_detect_area(self, x: float, y: float, w: float, h: float) -> None:
+        """検出エリア 4 値をまとめて更新し、detect_area_changed を 1 回 emit する。
+        個別 key の *_changed は使わず、この専用シグナルで通知する。
+        """
+        new = {"detect_area_x": float(x), "detect_area_y": float(y),
+               "detect_area_w": float(w), "detect_area_h": float(h)}
+        if all(self._values.get(k) == v for k, v in new.items()):
+            return
+        self._values.update(new)
+        self.detect_area_changed.emit(float(x), float(y), float(w), float(h))
