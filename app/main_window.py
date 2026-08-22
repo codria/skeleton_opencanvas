@@ -292,7 +292,7 @@ class MainWindow(QMainWindow):
         self._mask_area_ctrl.raise_()
 
         self._filter_area_ctrl = DetectAreaControlPanel(
-            "採用範囲 余白（入力範囲の内側から）", self._gl_widget)
+            "人物採用範囲 余白（入力範囲の内側から）", self._gl_widget)
         self._filter_area_ctrl.set_margins(*self._app_settings.filter_inset)
         self._filter_area_ctrl.margins_changed.connect(self._on_filter_margins_changed)
         self._filter_area_ctrl.raise_()
@@ -303,7 +303,7 @@ class MainWindow(QMainWindow):
         self._mask_area_label.setFont(font)
         self._mask_area_label.adjustSize()
         self._mask_area_label.raise_()
-        self._filter_area_label = QLabel("採用範囲（鼻基準）", self._gl_widget)
+        self._filter_area_label = QLabel("人物採用範囲（鼻基準）", self._gl_widget)
         self._filter_area_label.setStyleSheet(DETECT_FILTER_LABEL_STYLE)
         self._filter_area_label.setFont(font)
         self._filter_area_label.adjustSize()
