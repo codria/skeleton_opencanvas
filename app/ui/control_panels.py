@@ -414,7 +414,7 @@ class DetectAreaControlPanel(QWidget):
     RES = 1000
     MARGIN_MAX = 450   # 各辺の余白上限 = 0.45（左右/上下を足しても中央に幅が残る）
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, title: str = "検出エリア余白（端の除外）", parent=None) -> None:
         super().__init__(parent)
         self.setStyleSheet(VCTL_STYLE)
         self.setFixedHeight(128)
@@ -423,7 +423,7 @@ class DetectAreaControlPanel(QWidget):
         root.setContentsMargins(12, 6, 12, 6)
         root.setSpacing(3)
 
-        header = QLabel("検出エリア余白（端の除外）")
+        header = QLabel(title)
         header.setStyleSheet(VCTL_LABEL_STYLE)
         root.addWidget(header)
 

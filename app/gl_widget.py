@@ -48,8 +48,10 @@ class GLWidget(QOpenGLWidget):
         self._show_bones = False  # Bキーで切り替え
         self._internal_fbo: QOpenGLFramebufferObject | None = None
         # 検出エリア矩形（画像正規化 x,y,w,h）と、その可視化 ON/OFF。
-        # 可視化は UI 表示（H）に連動。フィルタ自体は PoseEstimator 側で常時有効。
-        self._detect_area: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+        # mask=入力マスク領域 / filter=検出後フィルタ領域 の 2 系統。
+        # 可視化は UI 表示（H）に連動。除外自体は PoseEstimator 側で常時有効。
+        self._mask_area: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+        self._filter_area: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
         self._show_detect_area = False
 
         logger.info("GLWidget 初期化")
@@ -108,9 +110,14 @@ class GLWidget(QOpenGLWidget):
     def show_bones(self) -> bool:
         return self._show_bones
 
-    def set_detect_area(self, x: float, y: float, w: float, h: float) -> None:
-        """検出エリア矩形（画像正規化）を更新して再描画する。"""
-        self._detect_area = (x, y, w, h)
+    def set_mask_area(self, x: float, y: float, w: float, h: float) -> None:
+        """① 入力マスク領域（画像正規化）を更新して再描画する。"""
+        self._mask_area = (x, y, w, h)
+        self.update()
+
+    def set_filter_area(self, x: float, y: float, w: float, h: float) -> None:
+        """② 検出後フィルタ領域（画像正規化）を更新して再描画する。"""
+        self._filter_area = (x, y, w, h)
         self.update()
 
     def set_show_detect_area(self, on: bool) -> None:
@@ -118,26 +125,41 @@ class GLWidget(QOpenGLWidget):
         self._show_detect_area = bool(on)
         self.update()
 
-    def draw_detect_area_overlay(self, area, frame, win_w: int, win_h: int) -> None:
-        """検出エリア矩形を描く。矩形外を薄暗くし、枠を緑で表示する。
-        座標はカメラ映像と同じアスペクト補正ビューポート内で解釈する。"""
-        ax, ay, aw, ah = area
-        # カメラアスペクトに合わせたビューポート（bone overlay と同じ計算）
+    @staticmethod
+    def _aspect_viewport(frame, win_w: int, win_h: int):
+        """カメラアスペクトに合わせたレターボックス viewport (x,y,w,h) を返す。"""
         if frame is not None:
             cam_aspect = frame.shape[1] / frame.shape[0]
         else:
             cam_aspect = 16 / 9
-        win_aspect = win_w / win_h
-        if win_aspect > cam_aspect:
+        if win_w / win_h > cam_aspect:
             view_h = win_h
             view_w = int(win_h * cam_aspect)
-            view_x = (win_w - view_w) // 2
-            view_y = 0
-        else:
-            view_w = win_w
-            view_h = int(win_w / cam_aspect)
-            view_x = 0
-            view_y = (win_h - view_h) // 2
+            return (win_w - view_w) // 2, 0, view_w, view_h
+        view_w = win_w
+        view_h = int(win_w / cam_aspect)
+        return 0, (win_h - view_h) // 2, view_w, view_h
+
+    def area_rect_widget_px(self, area) -> tuple[int, int, int, int]:
+        """検出エリア(画像正規化)を、このウィジェットのピクセル座標での
+        矩形 (x, y, w, h) に変換する。オーバーレイ QLabel の配置に使う。
+        内部 FBO(1280x720) はウィジェット全体に引き伸ばされて表示される。"""
+        ax, ay, aw, ah = area
+        iw, ih = self.INTERNAL_W, self.INTERNAL_H
+        vx, vy, vw, vh = self._aspect_viewport(self._frame, iw, ih)
+        fx = vx + ax * vw
+        fy = vy + ay * vh
+        sx = self.width() / iw
+        sy = self.height() / ih
+        return int(fx * sx), int(fy * sy), int(aw * vw * sx), int(ah * vh * sy)
+
+    def draw_detect_area_overlay(self, area, frame, win_w: int, win_h: int,
+                                 outline=(0.2, 1.0, 0.4),
+                                 dim_outside: bool = True) -> None:
+        """検出エリア矩形を描く。dim_outside=True なら矩形外を薄暗く、
+        outline 色で枠を描く。座標はカメラ映像と同じアスペクト補正 viewport 内。"""
+        ax, ay, aw, ah = area
+        view_x, view_y, view_w, view_h = self._aspect_viewport(frame, win_w, win_h)
 
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
@@ -164,18 +186,19 @@ class GLWidget(QOpenGLWidget):
             glEnd()
 
         # 矩形外（除外領域）を薄暗く：左/右/上/下の 4 帯
-        glColor4f(0.0, 0.0, 0.0, 0.45)
-        if rx > 0:
-            _quad(0, 0, rx, view_h)                       # 左
-        if rx + rw < view_w:
-            _quad(rx + rw, 0, view_w, view_h)             # 右
-        if ry > 0:
-            _quad(rx, 0, rx + rw, ry)                     # 上
-        if ry + rh < view_h:
-            _quad(rx, ry + rh, rx + rw, view_h)           # 下
+        if dim_outside:
+            glColor4f(0.0, 0.0, 0.0, 0.45)
+            if rx > 0:
+                _quad(0, 0, rx, view_h)                   # 左
+            if rx + rw < view_w:
+                _quad(rx + rw, 0, view_w, view_h)         # 右
+            if ry > 0:
+                _quad(rx, 0, rx + rw, ry)                 # 上
+            if ry + rh < view_h:
+                _quad(rx, ry + rh, rx + rw, view_h)       # 下
 
-        # 検出エリアの枠（緑）
-        glColor4f(0.2, 1.0, 0.4, 0.9)
+        # 検出エリアの枠
+        glColor4f(outline[0], outline[1], outline[2], 0.9)
         glLineWidth(2.0)
         glBegin(GL_LINE_LOOP)
         glVertex2f(rx, ry)
@@ -209,7 +232,13 @@ class GLWidget(QOpenGLWidget):
             if self._show_bones and self._results:
                 self.draw_bone_overlay(self._results, self._frame, iw, ih)
             if self._show_detect_area:
-                self.draw_detect_area_overlay(self._detect_area, self._frame, iw, ih)
+                # ① マスク領域：外側を暗く＋赤枠。② 判定領域：緑枠のみ。
+                self.draw_detect_area_overlay(
+                    self._mask_area, self._frame, iw, ih,
+                    outline=(1.0, 0.4, 0.2), dim_outside=True)
+                self.draw_detect_area_overlay(
+                    self._filter_area, self._frame, iw, ih,
+                    outline=(0.2, 1.0, 0.4), dim_outside=False)
         finally:
             self._internal_fbo.release()
 

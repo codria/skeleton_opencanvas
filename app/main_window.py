@@ -67,6 +67,15 @@ MODE_LABEL_STYLE = (
     "padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: bold;"
 )
 PANEL_STYLE = "background-color: rgba(26,26,26,200); border-top: 1px solid #444;"
+# 検出エリア矩形の題名ラベル（矩形左上に重ねる）。枠色に合わせた文字色。
+DETECT_MASK_LABEL_STYLE = (
+    "color: #ff7043; background-color: rgba(0,0,0,150);"
+    "padding: 2px 8px; border-radius: 4px; font-size: 12px;"
+)
+DETECT_FILTER_LABEL_STYLE = (
+    "color: #34e07a; background-color: rgba(0,0,0,150);"
+    "padding: 2px 8px; border-radius: 4px; font-size: 12px;"
+)
 
 
 class MainWindow(QMainWindow):
@@ -265,15 +274,37 @@ class MainWindow(QMainWindow):
             self._graph_x.set_font_scale(self._graph_scale)
             self._graph_y.set_font_scale(self._graph_scale)
 
-        # --- 検出エリアコントロール（全モード共通、常時表示）---
-        # 永続値を estimator（フィルタ）と GLWidget（矩形表示）に反映
-        self._estimator.set_detect_area(*self._app_settings.detect_area)
-        self._gl_widget.set_detect_area(*self._app_settings.detect_area)
+        # --- 検出エリアコントロール（2 段：① 入力マスク / ② 検出後フィルタ）---
+        # 永続値を estimator（除外）と GLWidget（矩形表示）に反映
+        self._estimator.set_mask_area(*self._app_settings.mask_area)
+        self._estimator.set_filter_area(*self._app_settings.filter_area)
+        self._gl_widget.set_mask_area(*self._app_settings.mask_area)
+        self._gl_widget.set_filter_area(*self._app_settings.filter_area)
         self._gl_widget.set_show_detect_area(self._ui_visible)
-        self._detect_area_ctrl = DetectAreaControlPanel(self._gl_widget)
-        self._detect_area_ctrl.set_values(*self._app_settings.detect_area)
-        self._detect_area_ctrl.area_changed.connect(self._on_detect_area_changed)
-        self._detect_area_ctrl.raise_()
+
+        self._mask_area_ctrl = DetectAreaControlPanel(
+            "マスク範囲 余白（入力側）", self._gl_widget)
+        self._mask_area_ctrl.set_values(*self._app_settings.mask_area)
+        self._mask_area_ctrl.area_changed.connect(self._on_mask_area_changed)
+        self._mask_area_ctrl.raise_()
+
+        self._filter_area_ctrl = DetectAreaControlPanel(
+            "判定範囲 余白（検出後）", self._gl_widget)
+        self._filter_area_ctrl.set_values(*self._app_settings.filter_area)
+        self._filter_area_ctrl.area_changed.connect(self._on_filter_area_changed)
+        self._filter_area_ctrl.raise_()
+
+        # 各矩形の左上に置く題名ラベル
+        self._mask_area_label = QLabel("マスク範囲", self._gl_widget)
+        self._mask_area_label.setStyleSheet(DETECT_MASK_LABEL_STYLE)
+        self._mask_area_label.setFont(font)
+        self._mask_area_label.adjustSize()
+        self._mask_area_label.raise_()
+        self._filter_area_label = QLabel("判定範囲", self._gl_widget)
+        self._filter_area_label.setStyleSheet(DETECT_FILTER_LABEL_STYLE)
+        self._filter_area_label.setFont(font)
+        self._filter_area_label.adjustSize()
+        self._filter_area_label.raise_()
 
         # --- 軌跡コントロール（Mode2/3 アクティブ時のみ表示）---
         self._trail_ctrl = TrailControlPanel(self._gl_widget)
@@ -398,12 +429,31 @@ class MainWindow(QMainWindow):
         if self._graph_size_ctrl.isVisible():
             slider_y += self._graph_size_ctrl.height() + 6
 
-        # 検出エリア（常時、_ui_visible 時のみ）
-        self._detect_area_ctrl.setGeometry(
-            left_x, slider_y, left_panel_w, self._detect_area_ctrl.height()
+        # 検出エリア ① マスク（常時、_ui_visible 時のみ）
+        self._mask_area_ctrl.setGeometry(
+            left_x, slider_y, left_panel_w, self._mask_area_ctrl.height()
         )
-        if self._detect_area_ctrl.isVisible():
-            slider_y += self._detect_area_ctrl.height() + 6
+        if self._mask_area_ctrl.isVisible():
+            slider_y += self._mask_area_ctrl.height() + 6
+
+        # 検出エリア ② 判定（常時、_ui_visible 時のみ）
+        self._filter_area_ctrl.setGeometry(
+            left_x, slider_y, left_panel_w, self._filter_area_ctrl.height()
+        )
+        if self._filter_area_ctrl.isVisible():
+            slider_y += self._filter_area_ctrl.height() + 6
+
+        # 題名ラベルを各矩形の左上に重ねる（映像上の位置。UI 表示時のみ）
+        if self._mask_area_label.isVisible():
+            mx, my, _mw, _mh = self._gl_widget.area_rect_widget_px(
+                self._app_settings.mask_area)
+            self._mask_area_label.move(mx + 4, my + 4)
+        if self._filter_area_label.isVisible():
+            fx, fy, _fw, _fh = self._gl_widget.area_rect_widget_px(
+                self._app_settings.filter_area)
+            # マスク題名と重なっても読めるよう 1 行分下げる
+            self._filter_area_label.move(
+                fx + 4, fy + 4 + self._mask_area_label.height() + 2)
 
         # 軌跡コントロール（Mode2/3 時のみ）
         self._trail_ctrl.setGeometry(
@@ -504,7 +554,10 @@ class MainWindow(QMainWindow):
         self._pose_ctrl.setVisible(self._ui_visible)
         self._smoothing_ctrl.setVisible(self._ui_visible)
         self._graph_size_ctrl.setVisible(self._ui_visible)
-        self._detect_area_ctrl.setVisible(self._ui_visible)
+        self._mask_area_ctrl.setVisible(self._ui_visible)
+        self._filter_area_ctrl.setVisible(self._ui_visible)
+        self._mask_area_label.setVisible(self._ui_visible)
+        self._filter_area_label.setVisible(self._ui_visible)
         self._gl_widget.set_show_detect_area(self._ui_visible)
         self._trail_ctrl.setVisible(self._ui_visible and self._current_mode_id in (2, 3))
         self._overlay_ctrl.setVisible(self._ui_visible and self._current_mode_id in (2, 3))
@@ -789,17 +842,31 @@ class MainWindow(QMainWindow):
         """指数移動平均の追従係数を変更する（リアルタイム反映）。"""
         self._estimator.set_smoothing_alpha(alpha)
 
-    def _on_detect_area_changed(self, x: float, y: float, w: float, h: float) -> None:
-        """検出エリアを変更する。矩形外の人物は判定対象から外れる。
-        w/h は x+w<=1, y+h<=1 になるようクランプし、フィルタ・矩形表示・永続化を一致させる。
-        """
+    @staticmethod
+    def _clamp_area(x: float, y: float, w: float, h: float
+                    ) -> tuple[float, float, float, float]:
+        """x+w<=1, y+h<=1 に収める。フィルタ・矩形表示・永続化を一致させる。"""
         x = min(max(x, 0.0), 1.0)
         y = min(max(y, 0.0), 1.0)
         w = min(max(w, 0.01), 1.0 - x)
         h = min(max(h, 0.01), 1.0 - y)
-        self._app_settings.set_detect_area(x, y, w, h)
-        self._estimator.set_detect_area(x, y, w, h)
-        self._gl_widget.set_detect_area(x, y, w, h)
+        return x, y, w, h
+
+    def _on_mask_area_changed(self, x: float, y: float, w: float, h: float) -> None:
+        """① 入力マスク領域を変更する。この外側は MediaPipe に渡す前に黒塗り。"""
+        x, y, w, h = self._clamp_area(x, y, w, h)
+        self._app_settings.set_mask_area(x, y, w, h)
+        self._estimator.set_mask_area(x, y, w, h)
+        self._gl_widget.set_mask_area(x, y, w, h)
+        self._update_overlay_positions()
+
+    def _on_filter_area_changed(self, x: float, y: float, w: float, h: float) -> None:
+        """② 検出後フィルタ領域を変更する。鼻がこの外の人物を捨てる。"""
+        x, y, w, h = self._clamp_area(x, y, w, h)
+        self._app_settings.set_filter_area(x, y, w, h)
+        self._estimator.set_filter_area(x, y, w, h)
+        self._gl_widget.set_filter_area(x, y, w, h)
+        self._update_overlay_positions()
 
     def _on_graph_scale_changed(self, scale: float) -> None:
         """グラフ表示サイズの係数を変更する。文字サイズも連動。

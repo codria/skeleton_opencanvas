@@ -39,7 +39,8 @@ class PoseEstimator:
         min_tracking_confidence: float,
         smoothing_alpha: float = 0.4,
         center_priority: bool = False,
-        detect_area: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
+        mask_area: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
+        filter_area: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
     ) -> None:
         """MediaPipe Pose Landmarker を初期化する。
 
@@ -62,11 +63,14 @@ class PoseEstimator:
         self._min_detection_confidence = min_detection_confidence
         self._min_tracking_confidence = min_tracking_confidence
         self._center_priority = bool(center_priority)
-        # 検出エリア（画像正規化 x, y, w, h）。画面端の写り込みを 2 段階で除外する：
-        #   ① 入力マスク：MediaPipe に渡す前にエリア外を黒く塗る（そもそも検出させない）
-        #   ② 検出後フィルタ：残った結果から鼻がエリア外の人物を捨てる（保険）
-        # (0,0,1,1) なら両段とも無効（全画面）。
-        self._detect_area = self._sanitize_area(detect_area)
+        # 検出エリア（画像正規化 x, y, w, h）。画面端の写り込みを 2 段階で除外する。
+        # 各段は独立した領域を持つ（先方の要望が「入力で消す」「判定で外す」どちらでも
+        # それぞれ個別に調整できる）：
+        #   ① 入力マスク mask_area  : MediaPipe に渡す前にこの外を黒塗り（検出させない）
+        #   ② 検出後フィルタ filter_area : 残った結果から鼻がこの外の人物を捨てる
+        # (0,0,1,1) ならその段は無効（全画面）。
+        self._mask_area = self._sanitize_area(mask_area)
+        self._filter_area = self._sanitize_area(filter_area)
         # estimate と set_num_poses の排他用
         self._lock = threading.Lock()
 
@@ -108,17 +112,27 @@ class PoseEstimator:
         h = max(0.01, min(1.0 - y, float(h)))
         return (x, y, w, h)
 
-    def set_detect_area(self, x: float, y: float, w: float, h: float) -> None:
-        """検出エリア（画像正規化 x,y,w,h）を変更する。範囲外の人物を除外する。"""
+    def set_mask_area(self, x: float, y: float, w: float, h: float) -> None:
+        """① 入力マスク領域（画像正規化 x,y,w,h）を変更する。"""
         with self._lock:
-            self._detect_area = self._sanitize_area((x, y, w, h))
-            # 対象集合が変わりうるので平滑化状態はクリア
+            self._mask_area = self._sanitize_area((x, y, w, h))
             self._smoothed.clear()
-        logger.info(f"detect_area={self._detect_area}")
+        logger.info(f"mask_area={self._mask_area}")
+
+    def set_filter_area(self, x: float, y: float, w: float, h: float) -> None:
+        """② 検出後フィルタ領域（画像正規化 x,y,w,h）を変更する。"""
+        with self._lock:
+            self._filter_area = self._sanitize_area((x, y, w, h))
+            self._smoothed.clear()
+        logger.info(f"filter_area={self._filter_area}")
 
     @property
-    def detect_area(self) -> tuple[float, float, float, float]:
-        return self._detect_area
+    def mask_area(self) -> tuple[float, float, float, float]:
+        return self._mask_area
+
+    @property
+    def filter_area(self) -> tuple[float, float, float, float]:
+        return self._filter_area
 
     @staticmethod
     def _mask_frame_to_area(rgb, area: tuple[float, float, float, float]):
@@ -217,7 +231,7 @@ class PoseEstimator:
             rgb_frame = np.ascontiguousarray(frame[:, :, ::-1])
             # ① 入力マスク：エリア外を黒塗り（rgb_frame は反転コピーなので
             #    in-place で塗っても表示用の元 frame には影響しない）。
-            self._mask_frame_to_area(rgb_frame, self._detect_area)
+            self._mask_frame_to_area(rgb_frame, self._mask_area)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             self._frame_timestamp_ms += 33  # 約30fps想定
             detection_result = self._landmarker.detect_for_video(
@@ -239,7 +253,7 @@ class PoseEstimator:
             # 検出エリア外の人物を除外（代表点=NOSE がエリア矩形の外なら捨てる）。
             # 画面端に写り込んだ別人を判定対象から外す。全画面(0,0,1,1)なら素通り。
             pose_landmarks_list, world_lists, changed = self._filter_by_area(
-                pose_landmarks_list, world_lists, self._detect_area
+                pose_landmarks_list, world_lists, self._filter_area
             )
             if changed:
                 # 集合が変わったフレームは EMA を新規扱いにする

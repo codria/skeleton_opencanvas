@@ -47,7 +47,9 @@ class AppSettings(QObject):
     mannequin_style_changed = pyqtSignal(str)  # "primitive" | "mesh" | "hidden"
     mirror_display_changed = pyqtSignal(bool)
     # 検出エリア（x, y, w, h）。4 値が連動するので専用シグナルでまとめて通知。
-    detect_area_changed = pyqtSignal(float, float, float, float)
+    # mask=入力マスク領域 / filter=検出後フィルタ領域 の 2 系統。
+    mask_area_changed = pyqtSignal(float, float, float, float)
+    filter_area_changed = pyqtSignal(float, float, float, float)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -152,22 +154,34 @@ class AppSettings(QObject):
     def mirror_display(self) -> bool:
         return bool(self._values["mirror_display"])
 
-    @property
-    def detect_area(self) -> tuple[float, float, float, float]:
+    def _area(self, prefix: str) -> tuple[float, float, float, float]:
         return (
-            float(self._values["detect_area_x"]),
-            float(self._values["detect_area_y"]),
-            float(self._values["detect_area_w"]),
-            float(self._values["detect_area_h"]),
+            float(self._values[f"{prefix}_x"]),
+            float(self._values[f"{prefix}_y"]),
+            float(self._values[f"{prefix}_w"]),
+            float(self._values[f"{prefix}_h"]),
         )
 
-    def set_detect_area(self, x: float, y: float, w: float, h: float) -> None:
-        """検出エリア 4 値をまとめて更新し、detect_area_changed を 1 回 emit する。
-        個別 key の *_changed は使わず、この専用シグナルで通知する。
-        """
-        new = {"detect_area_x": float(x), "detect_area_y": float(y),
-               "detect_area_w": float(w), "detect_area_h": float(h)}
+    def _set_area(self, prefix: str, signal, x, y, w, h) -> None:
+        new = {f"{prefix}_x": float(x), f"{prefix}_y": float(y),
+               f"{prefix}_w": float(w), f"{prefix}_h": float(h)}
         if all(self._values.get(k) == v for k, v in new.items()):
             return
         self._values.update(new)
-        self.detect_area_changed.emit(float(x), float(y), float(w), float(h))
+        signal.emit(float(x), float(y), float(w), float(h))
+
+    @property
+    def mask_area(self) -> tuple[float, float, float, float]:
+        return self._area("mask_area")
+
+    def set_mask_area(self, x: float, y: float, w: float, h: float) -> None:
+        """入力マスク領域を更新し mask_area_changed を 1 回 emit する。"""
+        self._set_area("mask_area", self.mask_area_changed, x, y, w, h)
+
+    @property
+    def filter_area(self) -> tuple[float, float, float, float]:
+        return self._area("filter_area")
+
+    def set_filter_area(self, x: float, y: float, w: float, h: float) -> None:
+        """検出後フィルタ領域を更新し filter_area_changed を 1 回 emit する。"""
+        self._set_area("filter_area", self.filter_area_changed, x, y, w, h)
