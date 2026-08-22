@@ -402,14 +402,17 @@ class SmoothingControlPanel(QWidget):
 
 
 class DetectAreaControlPanel(QWidget):
-    """検出エリア矩形（画像正規化 x, y, w, h）を 4 本のスライダーで調整する。
-    この矩形の外に鼻がある人物は判定対象から外れる（端の写り込み除外用）。
-    どれか 1 本でも動かすと area_changed(x, y, w, h) を emit する。
+    """検出エリアを「上下左右の余白（各辺から削る割合）」の 4 スライダーで調整する。
+    余白の外に鼻がある人物は判定対象から外れる（端の写り込み除外用）。
+    UI は margin 表現だが、対外的には内部座標 x,y,w,h に変換して
+    area_changed(x, y, w, h) を emit する（各 0〜1）。
+        x = left, y = top, w = 1-left-right, h = 1-top-bottom
     """
 
     area_changed = pyqtSignal(float, float, float, float)  # x, y, w, h（各 0〜1）
 
     RES = 1000
+    MARGIN_MAX = 450   # 各辺の余白上限 = 0.45（左右/上下を足しても中央に幅が残る）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -420,20 +423,21 @@ class DetectAreaControlPanel(QWidget):
         root.setContentsMargins(12, 6, 12, 6)
         root.setSpacing(3)
 
-        header = QLabel("検出エリア（端の写り込み除外）")
+        header = QLabel("検出エリア余白（端の除外）")
         header.setStyleSheet(VCTL_LABEL_STYLE)
         root.addWidget(header)
 
+        # 表示順は 左・右・上・下
         self._sliders: dict[str, QSlider] = {}
         self._value_labels: dict[str, QLabel] = {}
-        for key, name in (("x", "左端"), ("y", "上端"), ("w", "幅"), ("h", "高さ")):
+        for key, name in (("left", "左"), ("right", "右"), ("top", "上"), ("bottom", "下")):
             row = QHBoxLayout()
             row.setSpacing(8)
             prefix = QLabel(name)
             prefix.setStyleSheet(VCTL_LABEL_STYLE)
             prefix.setFixedWidth(40)
             slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setRange(0, self.RES)
+            slider.setRange(0, self.MARGIN_MAX)
             slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             slider.valueChanged.connect(self._on_any_changed)
             vlabel = QLabel("0.00")
@@ -446,20 +450,33 @@ class DetectAreaControlPanel(QWidget):
             self._sliders[key] = slider
             self._value_labels[key] = vlabel
 
-    def _values(self) -> tuple[float, float, float, float]:
-        return tuple(self._sliders[k].value() / self.RES for k in ("x", "y", "w", "h"))
+    def _margins(self) -> tuple[float, float, float, float]:
+        """(left, right, top, bottom) を割合で返す。"""
+        return tuple(self._sliders[k].value() / self.RES
+                     for k in ("left", "right", "top", "bottom"))
 
     def _on_any_changed(self, _v: int) -> None:
-        x, y, w, h = self._values()
-        for k, val in (("x", x), ("y", y), ("w", w), ("h", h)):
+        left, right, top, bottom = self._margins()
+        for k, val in (("left", left), ("right", right),
+                       ("top", top), ("bottom", bottom)):
             self._value_labels[k].setText(f"{val:.2f}")
+        # margin → xywh
+        x, y = left, top
+        w, h = 1.0 - left - right, 1.0 - top - bottom
         self.area_changed.emit(x, y, w, h)
 
     def set_values(self, x: float, y: float, w: float, h: float) -> None:
-        for k, val in (("x", x), ("y", y), ("w", w), ("h", h)):
+        """内部座標 x,y,w,h を margin に変換してスライダーへ反映する。"""
+        margins = {
+            "left": x,
+            "right": 1.0 - x - w,
+            "top": y,
+            "bottom": 1.0 - y - h,
+        }
+        for k, val in margins.items():
             s = self._sliders[k]
             s.blockSignals(True)
-            s.setValue(max(0, min(self.RES, int(round(val * self.RES)))))
+            s.setValue(max(0, min(self.MARGIN_MAX, int(round(val * self.RES)))))
             s.blockSignals(False)
             self._value_labels[k].setText(f"{val:.2f}")
 
