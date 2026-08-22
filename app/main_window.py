@@ -282,27 +282,28 @@ class MainWindow(QMainWindow):
         self._gl_widget.set_filter_area(*self._app_settings.filter_area)
         self._gl_widget.set_show_detect_area(self._ui_visible)
 
-        # マスク：全画面からの余白。判定：マスク内側からの余白（必ずマスク⊇判定）。
+        # 映像入力範囲：画面端からの余白。採用範囲：入力範囲の内側からの余白
+        # （必ず 入力範囲 ⊇ 採用範囲）。
         self._mask_area_ctrl = DetectAreaControlPanel(
-            "マスク範囲 余白（画面端から）", self._gl_widget)
+            "映像入力範囲 余白（画面端から）", self._gl_widget)
         mx, my, mw, mh = self._app_settings.mask_area
         self._mask_area_ctrl.set_margins(mx, 1.0 - mx - mw, my, 1.0 - my - mh)
         self._mask_area_ctrl.margins_changed.connect(self._on_mask_margins_changed)
         self._mask_area_ctrl.raise_()
 
         self._filter_area_ctrl = DetectAreaControlPanel(
-            "判定範囲 余白（マスク内側から）", self._gl_widget)
+            "採用範囲 余白（入力範囲の内側から）", self._gl_widget)
         self._filter_area_ctrl.set_margins(*self._app_settings.filter_inset)
         self._filter_area_ctrl.margins_changed.connect(self._on_filter_margins_changed)
         self._filter_area_ctrl.raise_()
 
-        # 各矩形の左上に置く題名ラベル
-        self._mask_area_label = QLabel("マスク範囲", self._gl_widget)
+        # 題名ラベル：入力範囲=矩形左上、採用範囲=矩形右上
+        self._mask_area_label = QLabel("映像入力範囲", self._gl_widget)
         self._mask_area_label.setStyleSheet(DETECT_MASK_LABEL_STYLE)
         self._mask_area_label.setFont(font)
         self._mask_area_label.adjustSize()
         self._mask_area_label.raise_()
-        self._filter_area_label = QLabel("判定範囲", self._gl_widget)
+        self._filter_area_label = QLabel("採用範囲（鼻基準）", self._gl_widget)
         self._filter_area_label.setStyleSheet(DETECT_FILTER_LABEL_STYLE)
         self._filter_area_label.setFont(font)
         self._filter_area_label.adjustSize()
