@@ -62,8 +62,10 @@ class PoseEstimator:
         self._min_detection_confidence = min_detection_confidence
         self._min_tracking_confidence = min_tracking_confidence
         self._center_priority = bool(center_priority)
-        # 検出エリア（画像正規化 x, y, w, h）。この矩形外に代表点(鼻)がある人物は捨てる。
-        # 画面端に写り込んだ別人を判定対象から外す用途。(0,0,1,1) で無効（全画面）。
+        # 検出エリア（画像正規化 x, y, w, h）。画面端の写り込みを 2 段階で除外する：
+        #   ① 入力マスク：MediaPipe に渡す前にエリア外を黒く塗る（そもそも検出させない）
+        #   ② 検出後フィルタ：残った結果から鼻がエリア外の人物を捨てる（保険）
+        # (0,0,1,1) なら両段とも無効（全画面）。
         self._detect_area = self._sanitize_area(detect_area)
         # estimate と set_num_poses の排他用
         self._lock = threading.Lock()
@@ -119,9 +121,33 @@ class PoseEstimator:
         return self._detect_area
 
     @staticmethod
+    def _mask_frame_to_area(rgb, area: tuple[float, float, float, float]):
+        """① 入力マスク：エリア矩形の外側を黒 (0) で塗りつぶす（in-place）。
+        MediaPipe にエリア外を見せないことで、端の人物をそもそも検出させない。
+        area が全画面 (0,0,1,1) なら何もしない。rgb は (H, W, 3) を想定。
+        """
+        ax, ay, aw, ah = area
+        if (ax, ay, aw, ah) == (0.0, 0.0, 1.0, 1.0):
+            return rgb
+        h, w = rgb.shape[:2]
+        x0 = max(0, min(w, int(round(ax * w))))
+        x1 = max(0, min(w, int(round((ax + aw) * w))))
+        y0 = max(0, min(h, int(round(ay * h))))
+        y1 = max(0, min(h, int(round((ay + ah) * h))))
+        if x0 > 0:
+            rgb[:, :x0] = 0
+        if x1 < w:
+            rgb[:, x1:] = 0
+        if y0 > 0:
+            rgb[:y0, :] = 0
+        if y1 < h:
+            rgb[y1:, :] = 0
+        return rgb
+
+    @staticmethod
     def _filter_by_area(pose_landmarks_list, world_lists,
                         area: tuple[float, float, float, float]):
-        """代表点(NOSE=index0)が area 矩形外の人物を除外する。
+        """② 検出後フィルタ：代表点(NOSE=index0)が area 矩形外の人物を除外する。
         戻り値: (filtered_pose_list, filtered_world_list, changed)。
         area が全画面 (0,0,1,1) なら素通り（changed=False）。
         """
@@ -189,6 +215,9 @@ class PoseEstimator:
         # set_num_poses 中に landmarker を作り替えるので、推論～smoothing 全体を排他
         with self._lock:
             rgb_frame = np.ascontiguousarray(frame[:, :, ::-1])
+            # ① 入力マスク：エリア外を黒塗り（rgb_frame は反転コピーなので
+            #    in-place で塗っても表示用の元 frame には影響しない）。
+            self._mask_frame_to_area(rgb_frame, self._detect_area)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             self._frame_timestamp_ms += 33  # 約30fps想定
             detection_result = self._landmarker.detect_for_video(
