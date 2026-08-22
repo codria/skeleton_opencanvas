@@ -402,19 +402,17 @@ class SmoothingControlPanel(QWidget):
 
 
 class DetectAreaControlPanel(QWidget):
-    """検出エリアを「上下左右の余白（各辺から削る割合）」の 4 スライダーで調整する。
-    余白の外に鼻がある人物は判定対象から外れる（端の写り込み除外用）。
-    UI は margin 表現だが、対外的には内部座標 x,y,w,h に変換して
-    area_changed(x, y, w, h) を emit する（各 0〜1）。
-        x = left, y = top, w = 1-left-right, h = 1-top-bottom
+    """4 辺の余白（左・右・上・下、各 0〜0.45）を調整する汎用スライダーパネル。
+    値の意味づけ（全画面からの余白か、別領域からの内側余白か）は呼び出し側に委ね、
+    ここは生の 4 辺の値を margins_changed(left, right, top, bottom) で emit する。
     """
 
-    area_changed = pyqtSignal(float, float, float, float)  # x, y, w, h（各 0〜1）
+    margins_changed = pyqtSignal(float, float, float, float)  # left,right,top,bottom
 
     RES = 1000
-    MARGIN_MAX = 450   # 各辺の余白上限 = 0.45（左右/上下を足しても中央に幅が残る）
+    MARGIN_MAX = 450   # 各辺の余白上限 = 0.45
 
-    def __init__(self, title: str = "検出エリア余白（端の除外）", parent=None) -> None:
+    def __init__(self, title: str = "余白", parent=None) -> None:
         super().__init__(parent)
         self.setStyleSheet(VCTL_STYLE)
         self.setFixedHeight(128)
@@ -450,30 +448,19 @@ class DetectAreaControlPanel(QWidget):
             self._sliders[key] = slider
             self._value_labels[key] = vlabel
 
-    def _margins(self) -> tuple[float, float, float, float]:
-        """(left, right, top, bottom) を割合で返す。"""
-        return tuple(self._sliders[k].value() / self.RES
-                     for k in ("left", "right", "top", "bottom"))
-
     def _on_any_changed(self, _v: int) -> None:
-        left, right, top, bottom = self._margins()
+        vals = {k: self._sliders[k].value() / self.RES
+                for k in ("left", "right", "top", "bottom")}
+        for k, v in vals.items():
+            self._value_labels[k].setText(f"{v:.2f}")
+        self.margins_changed.emit(vals["left"], vals["right"],
+                                  vals["top"], vals["bottom"])
+
+    def set_margins(self, left: float, right: float,
+                    top: float, bottom: float) -> None:
+        """4 辺の余白をスライダーへ反映する（signal は出さない）。"""
         for k, val in (("left", left), ("right", right),
                        ("top", top), ("bottom", bottom)):
-            self._value_labels[k].setText(f"{val:.2f}")
-        # margin → xywh
-        x, y = left, top
-        w, h = 1.0 - left - right, 1.0 - top - bottom
-        self.area_changed.emit(x, y, w, h)
-
-    def set_values(self, x: float, y: float, w: float, h: float) -> None:
-        """内部座標 x,y,w,h を margin に変換してスライダーへ反映する。"""
-        margins = {
-            "left": x,
-            "right": 1.0 - x - w,
-            "top": y,
-            "bottom": 1.0 - y - h,
-        }
-        for k, val in margins.items():
             s = self._sliders[k]
             s.blockSignals(True)
             s.setValue(max(0, min(self.MARGIN_MAX, int(round(val * self.RES)))))

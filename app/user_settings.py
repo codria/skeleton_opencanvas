@@ -36,18 +36,19 @@ DEFAULTS: dict = {
     # 画面全体を左右反転（鏡表示）。カメラ入力を推定前に flip するので、
     # 骨格・グラフ・魔法エフェクトすべて自動的に mirror される。
     "mirror_display": False,
-    # 検出エリア（画像正規化 x,y,w,h）。端の写り込みを 2 段階で除外する。
-    # 既定はどちらも左右の端 1/8 ずつを除外。
-    #   mask   : ① 入力マスク領域。MediaPipe に渡す前にこの外側を黒塗り。
+    # 端の写り込みを 2 段階で除外する。
+    #   ① 入力マスク領域 mask_area（画像正規化 x,y,w,h）：MediaPipe に渡す前に
+    #      この外側を黒塗り。全画面からの余白 UI で設定。既定は左右 1/8 除外。
     "mask_area_x": 0.125,
     "mask_area_y": 0.0,
     "mask_area_w": 0.75,
     "mask_area_h": 1.0,
-    #   filter : ② 検出後フィルタ領域。鼻がこの外にある人物を捨てる。
-    "filter_area_x": 0.125,
-    "filter_area_y": 0.0,
-    "filter_area_w": 0.75,
-    "filter_area_h": 1.0,
+    #   ② 検出後フィルタ：マスク領域の内側からの余白（l/r/t/b）で指定する。
+    #      判定領域は必ずマスク領域の内側になる。既定は 0（＝マスクと同じ）。
+    "filter_inset_l": 0.0,
+    "filter_inset_r": 0.0,
+    "filter_inset_t": 0.0,
+    "filter_inset_b": 0.0,
 }
 
 

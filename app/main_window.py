@@ -282,16 +282,18 @@ class MainWindow(QMainWindow):
         self._gl_widget.set_filter_area(*self._app_settings.filter_area)
         self._gl_widget.set_show_detect_area(self._ui_visible)
 
+        # マスク：全画面からの余白。判定：マスク内側からの余白（必ずマスク⊇判定）。
         self._mask_area_ctrl = DetectAreaControlPanel(
-            "マスク範囲 余白（入力側）", self._gl_widget)
-        self._mask_area_ctrl.set_values(*self._app_settings.mask_area)
-        self._mask_area_ctrl.area_changed.connect(self._on_mask_area_changed)
+            "マスク範囲 余白（画面端から）", self._gl_widget)
+        mx, my, mw, mh = self._app_settings.mask_area
+        self._mask_area_ctrl.set_margins(mx, 1.0 - mx - mw, my, 1.0 - my - mh)
+        self._mask_area_ctrl.margins_changed.connect(self._on_mask_margins_changed)
         self._mask_area_ctrl.raise_()
 
         self._filter_area_ctrl = DetectAreaControlPanel(
-            "判定範囲 余白（検出後）", self._gl_widget)
-        self._filter_area_ctrl.set_values(*self._app_settings.filter_area)
-        self._filter_area_ctrl.area_changed.connect(self._on_filter_area_changed)
+            "判定範囲 余白（マスク内側から）", self._gl_widget)
+        self._filter_area_ctrl.set_margins(*self._app_settings.filter_inset)
+        self._filter_area_ctrl.margins_changed.connect(self._on_filter_margins_changed)
         self._filter_area_ctrl.raise_()
 
         # 各矩形の左上に置く題名ラベル
@@ -443,17 +445,18 @@ class MainWindow(QMainWindow):
         if self._filter_area_ctrl.isVisible():
             slider_y += self._filter_area_ctrl.height() + 6
 
-        # 題名ラベルを各矩形の左上に重ねる（映像上の位置。UI 表示時のみ）
+        # 題名ラベル：マスク=矩形左上、判定=矩形右上（映像上の位置。UI 表示時のみ）
         if self._mask_area_label.isVisible():
             mx, my, _mw, _mh = self._gl_widget.area_rect_widget_px(
                 self._app_settings.mask_area)
+            self._mask_area_label.adjustSize()
             self._mask_area_label.move(mx + 4, my + 4)
         if self._filter_area_label.isVisible():
-            fx, fy, _fw, _fh = self._gl_widget.area_rect_widget_px(
+            fx, fy, fw, _fh = self._gl_widget.area_rect_widget_px(
                 self._app_settings.filter_area)
-            # マスク題名と重なっても読めるよう 1 行分下げる
+            self._filter_area_label.adjustSize()
             self._filter_area_label.move(
-                fx + 4, fy + 4 + self._mask_area_label.height() + 2)
+                fx + fw - self._filter_area_label.width() - 4, fy + 4)
 
         # 軌跡コントロール（Mode2/3 時のみ）
         self._trail_ctrl.setGeometry(
@@ -852,20 +855,28 @@ class MainWindow(QMainWindow):
         h = min(max(h, 0.01), 1.0 - y)
         return x, y, w, h
 
-    def _on_mask_area_changed(self, x: float, y: float, w: float, h: float) -> None:
-        """① 入力マスク領域を変更する。この外側は MediaPipe に渡す前に黒塗り。"""
-        x, y, w, h = self._clamp_area(x, y, w, h)
+    def _apply_filter_area(self) -> None:
+        """マスク＋内側余白から算出した判定領域を estimator と GLWidget に反映する。"""
+        fx, fy, fw, fh = self._app_settings.filter_area
+        self._estimator.set_filter_area(fx, fy, fw, fh)
+        self._gl_widget.set_filter_area(fx, fy, fw, fh)
+
+    def _on_mask_margins_changed(self, l: float, r: float,
+                                 t: float, b: float) -> None:
+        """① 入力マスク領域（画面端からの余白）を変更する。外側は入力前に黒塗り。
+        判定領域はマスク内側余白で定義されるので、マスク変更に追従して再反映する。"""
+        x, y, w, h = self._clamp_area(l, t, 1.0 - l - r, 1.0 - t - b)
         self._app_settings.set_mask_area(x, y, w, h)
         self._estimator.set_mask_area(x, y, w, h)
         self._gl_widget.set_mask_area(x, y, w, h)
+        self._apply_filter_area()   # マスク移動に判定を追従
         self._update_overlay_positions()
 
-    def _on_filter_area_changed(self, x: float, y: float, w: float, h: float) -> None:
-        """② 検出後フィルタ領域を変更する。鼻がこの外の人物を捨てる。"""
-        x, y, w, h = self._clamp_area(x, y, w, h)
-        self._app_settings.set_filter_area(x, y, w, h)
-        self._estimator.set_filter_area(x, y, w, h)
-        self._gl_widget.set_filter_area(x, y, w, h)
+    def _on_filter_margins_changed(self, l: float, r: float,
+                                   t: float, b: float) -> None:
+        """② 判定領域（マスク内側からの余白）を変更する。鼻がこの外の人物を捨てる。"""
+        self._app_settings.set_filter_inset(l, r, t, b)
+        self._apply_filter_area()
         self._update_overlay_positions()
 
     def _on_graph_scale_changed(self, scale: float) -> None:

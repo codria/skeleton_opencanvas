@@ -46,10 +46,10 @@ class AppSettings(QObject):
     mode3_angle_changed = pyqtSignal(float)
     mannequin_style_changed = pyqtSignal(str)  # "primitive" | "mesh" | "hidden"
     mirror_display_changed = pyqtSignal(bool)
-    # 検出エリア（x, y, w, h）。4 値が連動するので専用シグナルでまとめて通知。
-    # mask=入力マスク領域 / filter=検出後フィルタ領域 の 2 系統。
+    # 検出エリア。mask=入力マスク領域（全画面基準の x,y,w,h）、
+    # filter=マスク内側からの余白 inset(l,r,t,b)。連動値なので専用シグナルでまとめて通知。
     mask_area_changed = pyqtSignal(float, float, float, float)
-    filter_area_changed = pyqtSignal(float, float, float, float)
+    filter_inset_changed = pyqtSignal(float, float, float, float)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -179,9 +179,36 @@ class AppSettings(QObject):
         self._set_area("mask_area", self.mask_area_changed, x, y, w, h)
 
     @property
-    def filter_area(self) -> tuple[float, float, float, float]:
-        return self._area("filter_area")
+    def filter_inset(self) -> tuple[float, float, float, float]:
+        """マスク領域の内側からの余白 (left, right, top, bottom)。"""
+        return (
+            float(self._values["filter_inset_l"]),
+            float(self._values["filter_inset_r"]),
+            float(self._values["filter_inset_t"]),
+            float(self._values["filter_inset_b"]),
+        )
 
-    def set_filter_area(self, x: float, y: float, w: float, h: float) -> None:
-        """検出後フィルタ領域を更新し filter_area_changed を 1 回 emit する。"""
-        self._set_area("filter_area", self.filter_area_changed, x, y, w, h)
+    def set_filter_inset(self, l: float, r: float, t: float, b: float) -> None:
+        new = {"filter_inset_l": float(l), "filter_inset_r": float(r),
+               "filter_inset_t": float(t), "filter_inset_b": float(b)}
+        if all(self._values.get(k) == v for k, v in new.items()):
+            return
+        self._values.update(new)
+        self.filter_inset_changed.emit(float(l), float(r), float(t), float(b))
+
+    @property
+    def filter_area(self) -> tuple[float, float, float, float]:
+        """検出後フィルタ領域 (x,y,w,h)。mask_area をマスク内側余白で縮めた矩形。
+        必ずマスク領域の内側に収まる。"""
+        mx, my, mw, mh = self.mask_area
+        l, r, t, b = self.filter_inset
+        fx = mx + l
+        fy = my + t
+        fw = max(0.01, mw - l - r)
+        fh = max(0.01, mh - t - b)
+        # マスク右端/下端を越えないよう保険（inset が大きすぎる場合）
+        fx = min(fx, mx + mw - 0.01)
+        fy = min(fy, my + mh - 0.01)
+        fw = min(fw, mx + mw - fx)
+        fh = min(fh, my + mh - fy)
+        return (fx, fy, fw, fh)
