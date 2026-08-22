@@ -133,12 +133,49 @@ class Camera:
 
     def start(self) -> None:
         """初期ソース（カメラ）を起動する。
-        カメラが見つからない・映像が取得できない場合は CameraNotFoundError を送出する。
+        指定 device_index が使えない場合は近傍の番号（0..probe_max）を自動で試す。
+        いずれも駄目なら CameraNotFoundError を送出する。
         """
         try:
-            self._open(self._device_index)
+            used = self._open_camera_auto(self._device_index)
+            self._device_index = used   # カメラ復帰（C キー）でも使えた番号を使う
         except SourceOpenError as e:
             raise CameraNotFoundError(str(e)) from e
+
+    @staticmethod
+    def _probe_candidates(preferred: int, probe_max: int = 3) -> list[int]:
+        """カメラ番号の探索順。preferred を先頭に 0..probe_max を重複なく続ける。"""
+        seen: set[int] = set()
+        out: list[int] = []
+        for i in [preferred, *range(probe_max + 1)]:
+            if i >= 0 and i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
+
+    def _open_camera_auto(self, preferred: int) -> int:
+        """preferred から順にカメラ番号を試し、最初に開けた番号を返す。
+        指定番号以外で開けた場合は、config 更新を促す警告を出す。
+        全滅なら SourceOpenError。"""
+        candidates = self._probe_candidates(preferred)
+        last_err: Exception | None = None
+        for i in candidates:
+            try:
+                self._open(i)
+            except SourceOpenError as e:
+                last_err = e
+                logger.info(f"カメラ device_index={i} は使用不可: {e}")
+                continue
+            if i != preferred:
+                logger.warning(
+                    f"カメラ device_index={preferred} が使えないため {i} で起動しました。"
+                    f" 次回から探索を省くなら config.yaml の camera.device_index を "
+                    f"{i} にしてください。"
+                )
+            return i
+        raise SourceOpenError(
+            f"使用可能なカメラが見つかりません（試行 {candidates}）。最後のエラー: {last_err}"
+        )
 
     def switch_source(self, source: int | str) -> None:
         """ランタイムで入力ソースを切替する。
