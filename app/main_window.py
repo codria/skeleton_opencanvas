@@ -303,7 +303,7 @@ class MainWindow(QMainWindow):
         self._mask_area_label.setFont(font)
         self._mask_area_label.adjustSize()
         self._mask_area_label.raise_()
-        self._filter_area_label = QLabel("人物採用範囲（鼻基準）", self._gl_widget)
+        self._filter_area_label = QLabel("人物採用範囲（重心基準）", self._gl_widget)
         self._filter_area_label.setStyleSheet(DETECT_FILTER_LABEL_STYLE)
         self._filter_area_label.setFont(font)
         self._filter_area_label.adjustSize()
@@ -875,7 +875,7 @@ class MainWindow(QMainWindow):
 
     def _on_filter_margins_changed(self, l: float, r: float,
                                    t: float, b: float) -> None:
-        """② 判定領域（マスク内側からの余白）を変更する。鼻がこの外の人物を捨てる。"""
+        """② 人物採用範囲（入力範囲の内側からの余白）を変更する。重心がこの外の人物を捨てる。"""
         self._app_settings.set_filter_inset(l, r, t, b)
         self._apply_filter_area()
         self._update_overlay_positions()

@@ -67,7 +67,7 @@ class PoseEstimator:
         # 各段は独立した領域を持つ（先方の要望が「入力で消す」「判定で外す」どちらでも
         # それぞれ個別に調整できる）：
         #   ① 入力マスク mask_area  : MediaPipe に渡す前にこの外を黒塗り（検出させない）
-        #   ② 検出後フィルタ filter_area : 残った結果から鼻がこの外の人物を捨てる
+        #   ② 検出後フィルタ filter_area : 残った結果から重心がこの外の人物を捨てる
         # (0,0,1,1) ならその段は無効（全画面）。
         self._mask_area = self._sanitize_area(mask_area)
         self._filter_area = self._sanitize_area(filter_area)
@@ -158,20 +158,48 @@ class PoseEstimator:
             rgb[y1:, :] = 0
         return rgb
 
-    @staticmethod
-    def _filter_by_area(pose_landmarks_list, world_lists,
+    _FILTER_VIS = 0.5   # 重心計算に使う可視ランドマークの visibility 閾値
+
+    @classmethod
+    def _person_centroid(cls, plm):
+        """人物の代表点＝可視ランドマークの重心 (x, y) を返す。
+        腰など特定点だと上半身しか映らない時に破綻するので、可視点全体の平均を使う。
+        可視点が無ければ全点平均、ランドマーク自体が無ければ None。
+        """
+        xs, ys = [], []
+        for lm in plm:
+            v = lm.visibility if lm.visibility is not None else 0.0
+            if v >= cls._FILTER_VIS:
+                xs.append(lm.x)
+                ys.append(lm.y)
+        if not xs:   # 可視点なし → 全点平均で代替
+            xs = [lm.x for lm in plm]
+            ys = [lm.y for lm in plm]
+        if not xs:
+            return None
+        return sum(xs) / len(xs), sum(ys) / len(ys)
+
+    @classmethod
+    def _filter_by_area(cls, pose_landmarks_list, world_lists,
                         area: tuple[float, float, float, float]):
-        """② 検出後フィルタ：代表点(NOSE=index0)が area 矩形外の人物を除外する。
+        """② 検出後フィルタ：各人物の代表点（可視ランドマークの重心）が area 矩形外の
+        人物を除外する。
         戻り値: (filtered_pose_list, filtered_world_list, changed)。
         area が全画面 (0,0,1,1) なら素通り（changed=False）。
         """
         ax, ay, aw, ah = area
         if (ax, ay, aw, ah) == (0.0, 0.0, 1.0, 1.0):
             return pose_landmarks_list, world_lists, False
-        kept = [
-            i for i, plm in enumerate(pose_landmarks_list)
-            if plm and (ax <= plm[0].x <= ax + aw) and (ay <= plm[0].y <= ay + ah)
-        ]
+        kept = []
+        for i, plm in enumerate(pose_landmarks_list):
+            if not plm:
+                continue
+            c = cls._person_centroid(plm)
+            if c is None:
+                continue
+            cx, cy = c
+            if ax <= cx <= ax + aw and ay <= cy <= ay + ah:
+                kept.append(i)
         if len(kept) == len(pose_landmarks_list):
             return pose_landmarks_list, world_lists, False
         filtered_pl = [pose_landmarks_list[i] for i in kept]
